@@ -15,6 +15,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterPropertyString('Lights', '[]');     // [{switchVar:int, dimmerVar:int}]
         $this->RegisterPropertyInteger('TimeoutSec', 60);
         $this->RegisterPropertyInteger('DefaultDimPct', 20); // 1..100 % Zielhelligkeit
+        $this->RegisterPropertyBoolean('UseDefaultDim', true); // Helligkeit beim Einschalten setzen?
         $this->RegisterPropertyBoolean('StartEnabled', true);
 
         // Status-Variablen (Raum/Haus; Inhibit/Require)
@@ -204,7 +205,8 @@ class RoomMotionLightsDev2 extends IPSModule
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
                     ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
-                    ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100],
+                    ['type' => 'CheckBox', 'name' => 'UseDefaultDim', 'caption' => 'Helligkeit beim Einschalten setzen'],
+                    ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100, 'enabled' => (bool)$this->ReadPropertyBoolean('UseDefaultDim')],
                     ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren']
                 ]]
             ],
@@ -381,8 +383,8 @@ class RoomMotionLightsDev2 extends IPSModule
                 @RequestAction($sv, $on);
             }
 
-            // Beim Einschalten – falls Dimmer vorhanden – auf Ziel-Pegel setzen
-            if ($on && $dv > 0 && @IPS_VariableExists($dv)) {
+            // Beim Einschalten – falls Dimmer vorhanden – auf Ziel-Pegel setzen (optional)
+            if ($on && (bool)$this->ReadPropertyBoolean('UseDefaultDim') && $dv > 0 && @IPS_VariableExists($dv)) {
                 $current = @GetValueInteger($dv);
                 if (!is_int($current)) {
                     $current = (int)$current;
