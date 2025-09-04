@@ -614,6 +614,58 @@ class RoomMotionLightsDev2 extends IPSModule
         return ((float)$raw) <= (float)$this->getLuxMax();
     }
 
+    /* ================= Debug Snapshot ================= */
+    public function DebugDump(): void
+    {
+        $this->dbg('--- DEBUG SNAPSHOT START ---');
+
+        // Bewegungsmelder
+        $m = $this->getMotionVars();
+        $mStates = [];
+        foreach ($m as $vid) {
+            $mStates[] = ['id'=>$vid, 'val'=>(int)@GetValueBoolean($vid)];
+        }
+        $this->dbg('MotionVars='.json_encode($mStates));
+
+        // Lichter
+        $lights = $this->getLights();
+        $ls = [];
+        foreach ($lights as $a) {
+            $sv = (int)($a['switchVar'] ?? 0);
+            $dv = (int)($a['dimmerVar'] ?? 0);
+            $ls[] = [
+                'switchVar'=>$sv,
+                'switchVal'=> $sv>0? (int)@GetValueBoolean($sv) : null,
+                'dimmerVar'=>$dv,
+                'dimmerVal'=> $dv>0? (int)@GetValueInteger($dv) : null
+            ];
+        }
+        $this->dbg('Lights='.json_encode($ls));
+
+        // Statusbereiche
+        $this->dbg('RoomInhibit='.json_encode($this->getBoolVarList('RoomInhibit')));
+        $this->dbg('HouseInhibit='.json_encode($this->getBoolVarList('HouseInhibit')));
+        $this->dbg('RoomRequire='.json_encode($this->getBoolVarList('RoomRequire')));
+        $this->dbg('HouseRequire='.json_encode($this->getBoolVarList('HouseRequire')));
+
+        // Lux
+        $luxFeat = (bool)$this->ReadPropertyBoolean('UseLux');
+        $luxVar  = (int)$this->ReadPropertyInteger('LuxVar');
+        $luxMax  = (int)$this->ReadPropertyInteger('LuxMax');
+        $luxVal  = ($luxVar>0 && @IPS_VariableExists($luxVar)) ? (int)@GetValue($luxVar) : null;
+        $this->dbg('Lux: Feature='.($luxFeat?'ON':'OFF').' Var='.$luxVar.' Val='.(is_null($luxVal)?'n/a':$luxVal).' Max='.$luxMax);
+
+        // Settings
+        $this->dbg('Settings: TimeoutSec='.$this->getTimeoutSec(). ' DefaultDimPct='.$this->getDefaultDimPct().' UseDefaultDim='.(int)$this->ReadPropertyBoolean('UseDefaultDim').' AutoOffOnManual='.(int)$this->ReadPropertyBoolean('AutoOffOnManual'));
+
+        // Timerstatus
+        $until = (int)$this->ReadAttributeInteger('AutoOffUntil');
+        $remain = max(0, $until - time());
+        $this->dbg('Timer: AutoOffUntil='.$until.' (remain='.$remain.'s)');
+
+        $this->dbg('--- DEBUG SNAPSHOT END ---');
+    }
+
     /* ================= Profiles ================= */
     private function ensureProfiles(): void
     {
