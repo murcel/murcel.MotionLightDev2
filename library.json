@@ -1,0 +1,12 @@
+{
+    "id": "{B7D8B6B1-0C1B-4C3E-98F6-0E5B0F9B5C2A}",
+    "name": "MotionLightDev",
+    "author": "murcel",
+    "url": "https://github.com/murcel/murcel.MotionLightDev",
+    "compatibility": {
+        "version": "7.1"
+    },
+    "version": "0.4.4",
+    "build": 1,
+    "date": 20250818
+}
