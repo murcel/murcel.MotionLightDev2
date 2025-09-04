@@ -1,15 +1,15 @@
 {
-    "id": "{9C0F2D4E-8E1F-4B6D-9B2E-5B3D0A1C7F10}",
-    "name": "RoomMotionLightsDev",
+    "id": "{E21F093C-FD7D-4750-9576-D42B89B15E3C}",
+    "name": "RoomMotionLightsDev2",
     "type": 3,
     "vendor": "murcel",
     "aliases": [
-        "Raum-Bewegungslicht (DEV)",
-        "RoomMotionLights (DEV)"
+        "Raum-Bewegungslicht (DEV2)",
+        "RoomMotionLights (DEV2)"
     ],
     "parentRequirements": [],
     "childRequirements": [],
     "implemented": [],
-    "prefix": "RMLDEV",
+    "prefix": "RMLDEV2",
     "url": ""
 }
