@@ -40,6 +40,12 @@ class RoomMotionLightsDev2 extends IPSModule
 
         $this->RegisterVariableInteger('CountdownSec', 'Auto-Off Restzeit (s)', 'RMLDEV2.Seconds', 2);
 
+        $this->RegisterVariableInteger('Set_TimeoutSec', 'Timeout (s)', 'RMLDEV2.TimeoutSec', 7);
+        $this->EnableAction('Set_TimeoutSec');
+
+        $this->RegisterVariableInteger('Set_DefaultDim', 'Standard-Helligkeit (%)', '~Intensity.100', 8);
+        $this->EnableAction('Set_DefaultDim');
+
         // Status-Indicatoren (read-only)
         $this->RegisterVariableBoolean('RoomInhibitActive', 'Raum-Inhibit aktiv', 'RMLDEV2.Block', 3);
         $this->RegisterVariableBoolean('HouseInhibitActive', 'Haus-Inhibit aktiv', 'RMLDEV2.Block', 4);
@@ -130,6 +136,9 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->WriteAttributeInteger('AutoOffUntil', 0);
         @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
 
+        @SetValueInteger($this->GetIDForIdent('Set_TimeoutSec'), max(5, min(3600, (int)$this->ReadPropertyInteger('TimeoutSec'))));
+        @SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), max(1, min(100, (int)$this->ReadPropertyInteger('DefaultDimPct'))));
+
         $this->updateStatusIndicators();
     }
 
@@ -141,7 +150,7 @@ class RoomMotionLightsDev2 extends IPSModule
                 ['type' => 'ExpansionPanel', 'caption' => 'Bewegungsmelder', 'items' => [[
                     'type' => 'List', 'name' => 'MotionVars', 'caption' => 'Melder',
                     'columns' => [[
-                        'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
+                        'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                         'add' => 0, 'edit' => ['type' => 'SelectVariable']
                     ]],
                     'add' => true, 'delete' => true
@@ -152,14 +161,14 @@ class RoomMotionLightsDev2 extends IPSModule
                         [
                             'caption' => 'Ein/Aus-Variable',
                             'name' => 'switchVar',
-                            'width' => '600px',
+                            'width' => '80%',
                             'add' => 0,
                             'edit' => ['type' => 'SelectVariable']
                         ],
                         [
                             'caption' => 'Helligkeits-Variable (Intensity.100)',
                             'name' => 'dimmerVar',
-                            'width' => '600px',
+                            'width' => '80%',
                             'add' => 0,
                             'edit' => ['type' => 'SelectVariable']
                         ]
@@ -175,14 +184,14 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'Label', 'caption' => 'Nicht auslösen, wenn TRUE'],
                     ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Inhibit',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
                     ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Inhibit',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
@@ -190,14 +199,14 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'Label', 'caption' => 'Nur auslösen, wenn TRUE ("erzwingen")'],
                     ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Erfordern',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
                     ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Erfordern',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
@@ -229,6 +238,18 @@ class RoomMotionLightsDev2 extends IPSModule
                     @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
                 }
                 $this->updateStatusIndicators();
+                break;
+            case 'Set_TimeoutSec':
+                $val = max(5, min(3600, (int)$Value));
+                SetValueInteger($this->GetIDForIdent('Set_TimeoutSec'), $val);
+                // Wenn Timer aktiv ist, neu armieren
+                if ($this->ReadAttributeInteger('AutoOffUntil') > time()) {
+                    $this->armAutoOffTimer();
+                }
+                break;
+            case 'Set_DefaultDim':
+                $val = max(1, min(100, (int)$Value));
+                SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), $val);
                 break;
         }
     }
@@ -399,12 +420,26 @@ class RoomMotionLightsDev2 extends IPSModule
 
     private function getTimeoutSec(): int
     {
+        $id = @$this->GetIDForIdent('Set_TimeoutSec');
+        if ($id && IPS_VariableExists($id)) {
+            $v = (int)@GetValueInteger($id);
+            if ($v >= 5 && $v <= 3600) {
+                return $v;
+            }
+        }
         $t = (int)$this->ReadPropertyInteger('TimeoutSec');
         return max(5, min(3600, $t));
     }
 
     private function getDefaultDimPct(): int
     {
+        $id = @$this->GetIDForIdent('Set_DefaultDim');
+        if ($id && IPS_VariableExists($id)) {
+            $v = (int)@GetValueInteger($id);
+            if ($v >= 1 && $v <= 100) {
+                return $v;
+            }
+        }
         $p = (int)$this->ReadPropertyInteger('DefaultDimPct');
         return max(1, min(100, $p));
     }
@@ -575,6 +610,13 @@ class RoomMotionLightsDev2 extends IPSModule
             IPS_SetVariableProfileDigits('RMLDEV2.Seconds', 0);
             IPS_SetVariableProfileText('RMLDEV2.Seconds', '', ' s');
             IPS_SetVariableProfileValues('RMLDEV2.Seconds', 0, 86400, 1);
+        }
+        // Integer profile for TimeoutSec
+        if (!IPS_VariableProfileExists('RMLDEV2.TimeoutSec')) {
+            IPS_CreateVariableProfile('RMLDEV2.TimeoutSec', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileDigits('RMLDEV2.TimeoutSec', 0);
+            IPS_SetVariableProfileText('RMLDEV2.TimeoutSec', '', ' s');
+            IPS_SetVariableProfileValues('RMLDEV2.TimeoutSec', 5, 3600, 5);
         }
     }
 }
