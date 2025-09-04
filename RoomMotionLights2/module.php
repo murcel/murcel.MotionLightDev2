@@ -33,6 +33,9 @@ class RoomMotionLightsDev2 extends IPSModule
         // ---- Profiles ----
         $this->ensureProfiles();
 
+        // Debugging
+        $this->RegisterPropertyBoolean('DebugEnabled', false);
+
         // ---- Runtime variables ----
         $this->RegisterVariableBoolean('Enabled', 'Bewegungserkennung aktiv', '~Switch', 1);
         $this->EnableAction('Enabled');
@@ -219,9 +222,16 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100, 'enabled' => (bool)$this->ReadPropertyBoolean('UseDefaultDim')],
                     ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren'],
                     ['type' => 'CheckBox', 'name' => 'AutoOffOnManual', 'caption' => 'Auto-Off auch bei manuellem Einschalten'],
+                    ['type' => 'CheckBox', 'name' => 'DebugEnabled', 'caption' => 'Debug-Ausgabe aktivieren'],
                 ]]
             ],
-            'actions'  => [],
+            'actions'  => [
+                [
+                    'type'    => 'Button',
+                    'caption' => 'Debug Snapshot ausgeben',
+                    'onClick' => 'RMLDEV2_DebugDump($id);'
+                ]
+            ],
             'status'   => []
         ]);
     }
@@ -252,6 +262,12 @@ class RoomMotionLightsDev2 extends IPSModule
             case 'Set_DefaultDim':
                 $val = max(1, min(100, (int)$Value));
                 SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), $val);
+                break;
+            case 'DebugDump':
+                $this->DebugDump();
+                break;
+            default:
+                trigger_error("RequestAction: Unbekannter Ident $Ident", E_USER_WARNING);
                 break;
         }
     }
@@ -664,6 +680,14 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->dbg('Timer: AutoOffUntil='.$until.' (remain='.$remain.'s)');
 
         $this->dbg('--- DEBUG SNAPSHOT END ---');
+    }
+
+    /* ================= Debug helpers ================= */
+    private function dbg($msg)
+    {
+        if ($this->ReadPropertyBoolean('DebugEnabled')) {
+            $this->SendDebug('RMLDEV2', $msg, 0);
+        }
     }
 
     /* ================= Profiles ================= */
