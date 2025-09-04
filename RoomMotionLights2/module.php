@@ -38,6 +38,12 @@ class RoomMotionLightsDev2 extends IPSModule
 
         $this->RegisterVariableInteger('CountdownSec', 'Auto-Off Restzeit (s)', 'RMLDEV2.Seconds', 2);
 
+        // Status-Indicatoren (read-only)
+        $this->RegisterVariableBoolean('RoomInhibitActive', 'Raum-Inhibit aktiv', 'RMLDEV2.Block', 3);
+        $this->RegisterVariableBoolean('HouseInhibitActive', 'Haus-Inhibit aktiv', 'RMLDEV2.Block', 4);
+        $this->RegisterVariableBoolean('RequireSatisfied', 'Erfordern erfüllt/OK', 'RMLDEV2.Passed', 5);
+        $this->RegisterVariableBoolean('LuxOK', 'Lux-Bedingung OK', 'RMLDEV2.Passed', 6);
+
         // ---- Timers ----
         $this->RegisterTimer('AutoOff', 0, 'RMLDEV2_AutoOff($_IPS[\'TARGET\']);');
         $this->RegisterTimer('CountdownTick', 0, 'RMLDEV2_CountdownTick($_IPS[\'TARGET\']);');
@@ -84,6 +90,13 @@ class RoomMotionLightsDev2 extends IPSModule
             }
         }
 
+        // Register to Lux variable if used
+        $luxVid = $this->getLuxVar();
+        if ($luxVid > 0 && $this->isLuxConfigured()) {
+            $this->RegisterMessage($luxVid, self::VM_UPDATE);
+            $new[] = $luxVid;
+        }
+
         // Validate no variable appears in multiple status lists
         $allLists = [
             'RoomInhibit'  => $this->getBoolVarList('RoomInhibit'),
@@ -109,6 +122,8 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->SetTimerInterval('CountdownTick', 0);
         $this->WriteAttributeInteger('AutoOffUntil', 0);
         @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
+
+        $this->updateStatusIndicators();
     }
 
     /* ================= Configuration Form ================= */
@@ -192,6 +207,7 @@ class RoomMotionLightsDev2 extends IPSModule
                     $this->WriteAttributeInteger('AutoOffUntil', 0);
                     @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
                 }
+                $this->updateStatusIndicators();
                 break;
         }
     }
@@ -206,6 +222,7 @@ class RoomMotionLightsDev2 extends IPSModule
         if (!$this->isEnabled()) {
             return;
         }
+        $this->updateStatusIndicators();
 
         // Movement?
         if (in_array($SenderID, $this->getMotionVars(), true)) {
@@ -217,6 +234,7 @@ class RoomMotionLightsDev2 extends IPSModule
                 }
                 $this->switchLights(true);
                 $this->armAutoOffTimer();
+                $this->updateStatusIndicators();
             }
             return;
         }
@@ -256,6 +274,7 @@ class RoomMotionLightsDev2 extends IPSModule
             // Still motion → re-arm full timeout
             $this->armAutoOffTimer();
         }
+        $this->updateStatusIndicators();
     }
 
     public function CountdownTick(): void
@@ -281,6 +300,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->SetTimerInterval('AutoOff', $timeout * 1000);
         $this->SetTimerInterval('CountdownTick', 1000);
         @SetValueInteger($this->GetIDForIdent('CountdownSec'), $timeout);
+        $this->updateStatusIndicators();
     }
 
     private function armAutoOffIfIdle(): void
@@ -290,6 +310,28 @@ class RoomMotionLightsDev2 extends IPSModule
             $this->armAutoOffTimer();
         }
         // if still running, do nothing to avoid chattering
+        $this->updateStatusIndicators();
+    }
+    /* ================= Status Indicator Update ================= */
+    private function updateStatusIndicators(): void
+    {
+        // Inhibit
+        $roomInhibit  = $this->anyTrue($this->getBoolVarList('RoomInhibit'));
+        $houseInhibit = $this->anyTrue($this->getBoolVarList('HouseInhibit'));
+
+        // Require (erzwingen)
+        $roomReq  = $this->getBoolVarList('RoomRequire');
+        $houseReq = $this->getBoolVarList('HouseRequire');
+        $requireNeeded = (count($roomReq) + count($houseReq)) > 0;
+        $requireOK = !$requireNeeded || ($this->anyTrue($roomReq) || $this->anyTrue($houseReq));
+
+        // Lux
+        $luxOK = !$this->isLuxConfigured() || $this->isLuxOk();
+
+        @SetValueBoolean($this->GetIDForIdent('RoomInhibitActive'), $roomInhibit);
+        @SetValueBoolean($this->GetIDForIdent('HouseInhibitActive'), $houseInhibit);
+        @SetValueBoolean($this->GetIDForIdent('RequireSatisfied'), $requireOK);
+        @SetValueBoolean($this->GetIDForIdent('LuxOK'), $luxOK);
     }
 
     /* ================= Helpers ================= */
@@ -447,6 +489,18 @@ class RoomMotionLightsDev2 extends IPSModule
     /* ================= Profiles ================= */
     private function ensureProfiles(): void
     {
+        // Boolean profile: Block (TRUE=blockiert, FALSE=frei)
+        if (!IPS_VariableProfileExists('RMLDEV2.Block')) {
+            IPS_CreateVariableProfile('RMLDEV2.Block', VARIABLETYPE_BOOLEAN);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Block', 0, 'frei', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Block', 1, 'blockiert', '', -1);
+        }
+        // Boolean profile: Passed/OK (TRUE=OK, FALSE=nicht erfüllt)
+        if (!IPS_VariableProfileExists('RMLDEV2.Passed')) {
+            IPS_CreateVariableProfile('RMLDEV2.Passed', VARIABLETYPE_BOOLEAN);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 0, 'nicht erfüllt', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 1, 'OK', '', -1);
+        }
         // Einfaches Sekunden-Profil für Integer: zeigt "XYZ s"
         if (!IPS_VariableProfileExists('RMLDEV2.Seconds')) {
             IPS_CreateVariableProfile('RMLDEV2.Seconds', VARIABLETYPE_INTEGER);
