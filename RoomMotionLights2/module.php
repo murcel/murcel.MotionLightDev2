@@ -12,8 +12,9 @@ class RoomMotionLightsDev2 extends IPSModule
 
         // ---- Properties (from configuration form) ----
         $this->RegisterPropertyString('MotionVars', '[]'); // [{var:int}]
-        $this->RegisterPropertyString('Lights', '[]');     // [{switchVar:int}]
+        $this->RegisterPropertyString('Lights', '[]');     // [{switchVar:int, dimmerVar:int}]
         $this->RegisterPropertyInteger('TimeoutSec', 60);
+        $this->RegisterPropertyInteger('DefaultDimPct', 20); // 1..100 % Zielhelligkeit
         $this->RegisterPropertyBoolean('StartEnabled', true);
 
         // Status-Variablen (Raum/Haus; Inhibit/Require)
@@ -74,12 +75,17 @@ class RoomMotionLightsDev2 extends IPSModule
             $this->RegisterMessage($vid, self::VM_UPDATE);
             $new[] = $vid;
         }
-        // Register to Light switch variables (to observe manual on/off and reset countdown)
+        // Register to Light variables (Status + Dimmer)
         foreach ($this->getLights() as $l) {
             $sv = (int)($l['switchVar'] ?? 0);
             if ($sv > 0 && @IPS_VariableExists($sv)) {
                 $this->RegisterMessage($sv, self::VM_UPDATE);
                 $new[] = $sv;
+            }
+            $dv = (int)($l['dimmerVar'] ?? 0);
+            if ($dv > 0 && @IPS_VariableExists($dv)) {
+                $this->RegisterMessage($dv, self::VM_UPDATE);
+                $new[] = $dv;
             }
         }
         // Register to status variables (room/house inhibit/require)
@@ -134,17 +140,29 @@ class RoomMotionLightsDev2 extends IPSModule
                 ['type' => 'ExpansionPanel', 'caption' => 'Bewegungsmelder', 'items' => [[
                     'type' => 'List', 'name' => 'MotionVars', 'caption' => 'Melder',
                     'columns' => [[
-                        'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                        'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
                         'add' => 0, 'edit' => ['type' => 'SelectVariable']
                     ]],
                     'add' => true, 'delete' => true
                 ]]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Lichter', 'items' => [[
                     'type' => 'List', 'name' => 'Lights', 'caption' => 'Akteure',
-                    'columns' => [[
-                        'caption' => 'Ein/Aus-Variable', 'name' => 'switchVar', 'width' => '350px',
-                        'add' => 0, 'edit' => ['type' => 'SelectVariable']
-                    ]],
+                    'columns' => [
+                        [
+                            'caption' => 'Ein/Aus-Variable',
+                            'name' => 'switchVar',
+                            'width' => '600px',
+                            'add' => 0,
+                            'edit' => ['type' => 'SelectVariable']
+                        ],
+                        [
+                            'caption' => 'Helligkeits-Variable (Intensity.100)',
+                            'name' => 'dimmerVar',
+                            'width' => '600px',
+                            'add' => 0,
+                            'edit' => ['type' => 'SelectVariable']
+                        ]
+                    ],
                     'add' => true, 'delete' => true
                 ]]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Lux (optional)', 'items' => [
@@ -156,14 +174,14 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'Label', 'caption' => 'Nicht auslösen, wenn TRUE'],
                     ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Inhibit',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
                     ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Inhibit',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
@@ -171,14 +189,14 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'Label', 'caption' => 'Nur auslösen, wenn TRUE ("erzwingen")'],
                     ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Erfordern',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
                     ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Erfordern',
                         'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '600px',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
@@ -186,6 +204,7 @@ class RoomMotionLightsDev2 extends IPSModule
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
                     ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
+                    ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100],
                     ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren']
                 ]]
             ],
@@ -239,10 +258,11 @@ class RoomMotionLightsDev2 extends IPSModule
             return;
         }
 
-        // Manual changes on light status: if turned on manually and module enabled, (re-)arm timer;
-        // if turned off manually and no motion active, stop timers.
+        // Manual changes on light variables:
         foreach ($this->getLights() as $l) {
             $sv = (int)($l['switchVar'] ?? 0);
+            $dv = (int)($l['dimmerVar'] ?? 0);
+
             if ($sv > 0 && $SenderID === $sv) {
                 $on = (bool)@GetValueBoolean($sv);
                 if ($on) {
@@ -254,6 +274,20 @@ class RoomMotionLightsDev2 extends IPSModule
                         $this->WriteAttributeInteger('AutoOffUntil', 0);
                         @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
                     }
+                }
+                return;
+            } elseif ($dv > 0 && $SenderID === $dv) {
+                // Dimmer manuell verändert → wenn irgendein Schalter "an" ist, Timer (re-)armen
+                $anyOn = false;
+                foreach ($this->getLights() as $ll) {
+                    $ssv = (int)($ll['switchVar'] ?? 0);
+                    if ($ssv > 0 && @IPS_VariableExists($ssv) && (bool)@GetValueBoolean($ssv)) {
+                        $anyOn = true;
+                        break;
+                    }
+                }
+                if ($anyOn) {
+                    $this->armAutoOffIfIdle();
                 }
                 return;
             }
@@ -312,6 +346,7 @@ class RoomMotionLightsDev2 extends IPSModule
         // if still running, do nothing to avoid chattering
         $this->updateStatusIndicators();
     }
+
     /* ================= Status Indicator Update ================= */
     private function updateStatusIndicators(): void
     {
@@ -337,10 +372,25 @@ class RoomMotionLightsDev2 extends IPSModule
     /* ================= Helpers ================= */
     private function switchLights(bool $on): void
     {
+        $targetPct = $this->getDefaultDimPct();
         foreach ($this->getLights() as $l) {
             $sv = (int)($l['switchVar'] ?? 0);
+            $dv = (int)($l['dimmerVar'] ?? 0);
+
             if ($sv > 0 && @IPS_VariableExists($sv)) {
                 @RequestAction($sv, $on);
+            }
+
+            // Beim Einschalten – falls Dimmer vorhanden – auf Ziel-Pegel setzen
+            if ($on && $dv > 0 && @IPS_VariableExists($dv)) {
+                $current = @GetValueInteger($dv);
+                if (!is_int($current)) {
+                    $current = (int)$current;
+                }
+                if ($targetPct > 0 && $current !== $targetPct) {
+                    // Dimmer-Variable hat Profil Intensity.100 (0..100) → wir geben Prozent direkt
+                    @RequestAction($dv, $targetPct);
+                }
             }
         }
     }
@@ -349,6 +399,12 @@ class RoomMotionLightsDev2 extends IPSModule
     {
         $t = (int)$this->ReadPropertyInteger('TimeoutSec');
         return max(5, min(3600, $t));
+    }
+
+    private function getDefaultDimPct(): int
+    {
+        $p = (int)$this->ReadPropertyInteger('DefaultDimPct');
+        return max(1, min(100, $p));
     }
 
     private function isEnabled(): bool
@@ -385,7 +441,17 @@ class RoomMotionLightsDev2 extends IPSModule
     private function getLights(): array
     {
         $arr = @json_decode($this->ReadPropertyString('Lights'), true);
-        return is_array($arr) ? $arr : [];
+        if (!is_array($arr)) {
+            return [];
+        }
+        $out = [];
+        foreach ($arr as $row) {
+            $out[] = [
+                'switchVar' => (int)($row['switchVar'] ?? 0),
+                'dimmerVar' => (int)($row['dimmerVar'] ?? 0),
+            ];
+        }
+        return $out;
     }
 
     private function getRegisteredIDs(): array
