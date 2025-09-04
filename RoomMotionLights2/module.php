@@ -17,6 +17,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterPropertyInteger('DefaultDimPct', 20); // 1..100 % Zielhelligkeit
         $this->RegisterPropertyBoolean('UseDefaultDim', true); // Helligkeit beim Einschalten setzen?
         $this->RegisterPropertyBoolean('StartEnabled', true);
+        $this->RegisterPropertyBoolean('AutoOffOnManual', false);
 
         // Status-Variablen (Raum/Haus; Inhibit/Require)
         $this->RegisterPropertyString('RoomInhibit', '[]');  // [{var:int}]
@@ -216,7 +217,8 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
                     ['type' => 'CheckBox', 'name' => 'UseDefaultDim', 'caption' => 'Helligkeit beim Einschalten setzen'],
                     ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100, 'enabled' => (bool)$this->ReadPropertyBoolean('UseDefaultDim')],
-                    ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren']
+                    ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren'],
+                    ['type' => 'CheckBox', 'name' => 'AutoOffOnManual', 'caption' => 'Auto-Off auch bei manuellem Einschalten'],
                 ]]
             ],
             'actions'  => [],
@@ -272,9 +274,10 @@ class RoomMotionLightsDev2 extends IPSModule
             // only react on TRUE edges
             if ($mv) {
                 if (!$this->shouldAllowAutoOn()) {
-                    return; // Bedingungen nicht erfüllt
+                    return; // Bedingungen nicht erfüllt -> weder schalten noch Counter starten
                 }
                 $this->switchLights(true);
+                // Counter nur nach erfolgreichem Einschalten
                 $this->armAutoOffTimer();
                 $this->updateStatusIndicators();
             }
@@ -289,8 +292,12 @@ class RoomMotionLightsDev2 extends IPSModule
             if ($sv > 0 && $SenderID === $sv) {
                 $on = (bool)@GetValueBoolean($sv);
                 if ($on) {
-                    $this->armAutoOffIfIdle();
+                    // Nur wenn gewünscht und Bedingungen erfüllt
+                    if ($this->ReadPropertyBoolean('AutoOffOnManual') && $this->shouldAllowAutoOff()) {
+                        $this->armAutoOffIfIdle();
+                    }
                 } else {
+                    // Beim manuellen Ausschalten Timer nur stoppen, wenn keine Bewegung mehr aktiv
                     if (!$this->isAnyMotionActive()) {
                         $this->SetTimerInterval('AutoOff', 0);
                         $this->SetTimerInterval('CountdownTick', 0);
@@ -300,7 +307,7 @@ class RoomMotionLightsDev2 extends IPSModule
                 }
                 return;
             } elseif ($dv > 0 && $SenderID === $dv) {
-                // Dimmer manuell verändert → wenn irgendein Schalter "an" ist, Timer (re-)armen
+                // Dimmer manuell verändert → wenn irgendein Schalter "an" ist, Timer optional (AutoOffOnManual) und nur wenn erlaubt
                 $anyOn = false;
                 foreach ($this->getLights() as $ll) {
                     $ssv = (int)($ll['switchVar'] ?? 0);
@@ -309,7 +316,7 @@ class RoomMotionLightsDev2 extends IPSModule
                         break;
                     }
                 }
-                if ($anyOn) {
+                if ($anyOn && $this->ReadPropertyBoolean('AutoOffOnManual') && $this->shouldAllowAutoOff()) {
                     $this->armAutoOffIfIdle();
                 }
                 return;
@@ -549,6 +556,24 @@ class RoomMotionLightsDev2 extends IPSModule
             return false; // zu hell
         }
 
+        return true;
+    }
+
+    private function shouldAllowAutoOff(): bool
+    {
+        // Auto-Off (bei manuellem Einschalten) ist nur erlaubt,
+        // wenn nicht blockiert und – falls Erfordern-Listen vorhanden – mindestens eine TRUE ist.
+        if ($this->anyTrue($this->getBoolVarList('RoomInhibit')) || $this->anyTrue($this->getBoolVarList('HouseInhibit'))) {
+            return false;
+        }
+        $roomReq  = $this->getBoolVarList('RoomRequire');
+        $houseReq = $this->getBoolVarList('HouseRequire');
+        if ((count($roomReq) + count($houseReq)) > 0) {
+            if (!($this->anyTrue($roomReq) || $this->anyTrue($houseReq))) {
+                return false;
+            }
+        }
+        // Lux spielt für Auto-Off bei manueller Bedienung keine Rolle
         return true;
     }
 
