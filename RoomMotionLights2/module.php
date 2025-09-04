@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-class RoomMotionLights2 extends IPSModule
+class RoomMotionLightsDev2 extends IPSModule
 {
     public function Create()
     {
