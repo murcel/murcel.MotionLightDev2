@@ -10,6 +10,8 @@ class RoomMotionLightsDev2 extends IPSModule
     {
         parent::Create();
 
+        $this->ensureProfiles();
+
         // ---- Properties (from configuration form) ----
         $this->RegisterPropertyString('MotionVars', '[]'); // [{var:int}]
         $this->RegisterPropertyString('Lights', '[]');     // [{switchVar:int}]
@@ -20,9 +22,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterVariableBoolean('Enabled', 'Bewegungserkennung aktiv', '~Switch', 1);
         $this->EnableAction('Enabled');
 
-        $this->RegisterVariableInteger('CountdownSec', 'Auto-Off Restzeit (s)', '~UnixTimestampTime', 2);
-        // ~UnixTimestampTime zeigt hh:mm:ss; wir schreiben hier Sekunden rein – rein optisch ausreichend.
-        // Alternativ könnte ein eigenes Profil angelegt werden.
+        $this->RegisterVariableInteger('CountdownSec', 'Auto-Off Restzeit (s)', 'RMLDEV2.Seconds', 2);
 
         // ---- Timers ----
         $this->RegisterTimer('AutoOff', 0, 'RMLDEV2_AutoOff($_IPS[\'TARGET\']);');
@@ -31,20 +31,21 @@ class RoomMotionLightsDev2 extends IPSModule
         // ---- Attributes ----
         $this->RegisterAttributeInteger('AutoOffUntil', 0);
         $this->RegisterAttributeString('RegisteredIDs', '[]');
+        $this->RegisterAttributeBoolean('EnabledInit', false);
     }
 
     public function ApplyChanges()
     {
         parent::ApplyChanges();
 
-        // Mirror StartEnabled → Enabled (only when freshly created or variable not yet set)
+        $this->ensureProfiles();
+
+        // Mirror StartEnabled → Enabled only once (first run after install)
         $enabledVarID = $this->GetIDForIdent('Enabled');
-        if ($enabledVarID && IPS_VariableExists($enabledVarID)) {
-            if (GetValue($enabledVarID) === null) {
-                @SetValueBoolean($enabledVarID, (bool)$this->ReadPropertyBoolean('StartEnabled'));
-            }
-        } else {
+        $wasInit = (bool)$this->ReadAttributeBoolean('EnabledInit');
+        if ($enabledVarID && IPS_VariableExists($enabledVarID) && !$wasInit) {
             @SetValueBoolean($enabledVarID, (bool)$this->ReadPropertyBoolean('StartEnabled'));
+            $this->WriteAttributeBoolean('EnabledInit', true);
         }
 
         // Unregister previous Message subscriptions
@@ -284,5 +285,16 @@ class RoomMotionLightsDev2 extends IPSModule
     {
         $ids = array_values(array_unique(array_map('intval', $ids)));
         $this->WriteAttributeString('RegisteredIDs', json_encode($ids));
+    }
+
+    private function ensureProfiles(): void
+    {
+        // Integer seconds with " s" suffix (avoids timezone offset of ~UnixTimestampTime)
+        if (!IPS_VariableProfileExists('RMLDEV2.Seconds')) {
+            IPS_CreateVariableProfile('RMLDEV2.Seconds', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileText('RMLDEV2.Seconds', '', ' s');
+            IPS_SetVariableProfileDigits('RMLDEV2.Seconds', 0);
+            IPS_SetVariableProfileValues('RMLDEV2.Seconds', 0, 86400, 1); // up to 24h
+        }
     }
 }
