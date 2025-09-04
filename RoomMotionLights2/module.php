@@ -16,6 +16,12 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterPropertyInteger('TimeoutSec', 60);
         $this->RegisterPropertyBoolean('StartEnabled', true);
 
+        // Status-Variablen (Raum/Haus; Inhibit/Require)
+        $this->RegisterPropertyString('RoomInhibit', '[]');  // [{var:int}]
+        $this->RegisterPropertyString('HouseInhibit', '[]'); // [{var:int}]
+        $this->RegisterPropertyString('RoomRequire', '[]');  // [{var:int}]
+        $this->RegisterPropertyString('HouseRequire', '[]'); // [{var:int}]
+
         // Lux (optional)
         $this->RegisterPropertyInteger('LuxVar', 0); // VariableID eines Helligkeitssensors
         $this->RegisterPropertyInteger('LuxMax', 50);
@@ -70,6 +76,32 @@ class RoomMotionLightsDev2 extends IPSModule
                 $new[] = $sv;
             }
         }
+        // Register to status variables (room/house inhibit/require)
+        foreach (['RoomInhibit','HouseInhibit','RoomRequire','HouseRequire'] as $prop) {
+            foreach ($this->getBoolVarList($prop) as $vid) {
+                $this->RegisterMessage($vid, self::VM_UPDATE);
+                $new[] = $vid;
+            }
+        }
+
+        // Validate no variable appears in multiple status lists
+        $allLists = [
+            'RoomInhibit'  => $this->getBoolVarList('RoomInhibit'),
+            'HouseInhibit' => $this->getBoolVarList('HouseInhibit'),
+            'RoomRequire'  => $this->getBoolVarList('RoomRequire'),
+            'HouseRequire' => $this->getBoolVarList('HouseRequire')
+        ];
+        $seen = [];
+        foreach ($allLists as $listName => $ids) {
+            foreach ($ids as $id) {
+                if (isset($seen[$id]) && $seen[$id] !== $listName) {
+                    $this->SendDebug('Config', sprintf('Variable %d ist mehrfach konfiguriert (%s & %s). Bitte korrigieren.', $id, $seen[$id], $listName), 0);
+                } else {
+                    $seen[$id] = $listName;
+                }
+            }
+        }
+
         $this->setRegisteredIDs($new);
 
         // Ensure timers are stopped on config change
@@ -104,6 +136,38 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'CheckBox', 'name' => 'UseLux', 'caption' => 'Lux berücksichtigen'],
                     ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable', 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')],
                     ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Wenn Lux niedriger als ⇒ schalten', 'minimum' => 0, 'maximum' => 100000, 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')]
+                ]],
+                ['type' => 'ExpansionPanel', 'caption' => 'Statusbedingungen (Raum & Haus)', 'items' => [
+                    ['type' => 'Label', 'caption' => 'Nicht auslösen, wenn TRUE'],
+                    ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Inhibit',
+                        'columns' => [[
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                        ]],
+                        'add' => true, 'delete' => true
+                    ],
+                    ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Inhibit',
+                        'columns' => [[
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                        ]],
+                        'add' => true, 'delete' => true
+                    ],
+                    ['type' => 'Label', 'caption' => 'Nur auslösen, wenn TRUE ("erzwingen")'],
+                    ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Erfordern',
+                        'columns' => [[
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                        ]],
+                        'add' => true, 'delete' => true
+                    ],
+                    ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Erfordern',
+                        'columns' => [[
+                            'caption' => 'Variable', 'name' => 'var', 'width' => '350px',
+                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                        ]],
+                        'add' => true, 'delete' => true
+                    ]
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
                     ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
@@ -148,9 +212,8 @@ class RoomMotionLightsDev2 extends IPSModule
             $mv = (bool)@GetValueBoolean($SenderID);
             // only react on TRUE edges
             if ($mv) {
-                // Lux-Bedingung beachten (nur wenn LuxVar konfiguriert)
-                if ($this->isLuxConfigured() && !$this->isLuxOk()) {
-                    return; // zu hell → nichts schalten
+                if (!$this->shouldAllowAutoOn()) {
+                    return; // Bedingungen nicht erfüllt
                 }
                 $this->switchLights(true);
                 $this->armAutoOffTimer();
@@ -294,6 +357,54 @@ class RoomMotionLightsDev2 extends IPSModule
     {
         $ids = array_values(array_unique(array_map('intval', $ids)));
         $this->WriteAttributeString('RegisteredIDs', json_encode($ids));
+    }
+
+    /* ================= Status gating (Inhibit/Require) ================= */
+    private function getBoolVarList(string $propName): array
+    {
+        $raw = @json_decode($this->ReadPropertyString($propName), true);
+        $ids = [];
+        if (is_array($raw)) {
+            foreach ($raw as $row) {
+                $ids[] = (int)($row['var'] ?? 0);
+            }
+        }
+        return array_values(array_unique(array_filter($ids, fn($id) => $id > 0 && @IPS_VariableExists($id))));
+    }
+
+    private function anyTrue(array $ids): bool
+    {
+        foreach ($ids as $id) {
+            $v = @GetValueBoolean($id);
+            if ($v === true) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function shouldAllowAutoOn(): bool
+    {
+        // 1) Inhibit zuerst: wenn irgendein Inhibit TRUE ist → blockieren
+        if ($this->anyTrue($this->getBoolVarList('RoomInhibit')) || $this->anyTrue($this->getBoolVarList('HouseInhibit'))) {
+            return false;
+        }
+
+        // 2) Require (erzwingen): Wenn Listen konfiguriert sind, muss mind. eine TRUE sein
+        $roomReq  = $this->getBoolVarList('RoomRequire');
+        $houseReq = $this->getBoolVarList('HouseRequire');
+        if ((count($roomReq) + count($houseReq)) > 0) {
+            if (!($this->anyTrue($roomReq) || $this->anyTrue($houseReq))) {
+                return false; // nichts erzwingt → nicht schalten
+            }
+        }
+
+        // 3) Lux-Prüfung (wenn konfiguriert/aktiv)
+        if ($this->isLuxConfigured() && !$this->isLuxOk()) {
+            return false; // zu hell
+        }
+
+        return true;
     }
 
     /* ================= Lux helpers ================= */
