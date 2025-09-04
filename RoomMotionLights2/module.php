@@ -19,6 +19,7 @@ class RoomMotionLightsDev2 extends IPSModule
         // Lux (optional)
         $this->RegisterPropertyInteger('LuxVar', 0); // VariableID eines Helligkeitssensors
         $this->RegisterPropertyInteger('LuxMax', 50);
+        $this->RegisterPropertyBoolean('UseLux', true);
 
         // ---- Profiles ----
         $this->ensureProfiles();
@@ -100,8 +101,9 @@ class RoomMotionLightsDev2 extends IPSModule
                     'add' => true, 'delete' => true
                 ]]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Lux (optional)', 'items' => [
-                    ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable'],
-                    ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Lux-Maximalwert', 'minimum' => 0, 'maximum' => 100000]
+                    ['type' => 'CheckBox', 'name' => 'UseLux', 'caption' => 'Lux berücksichtigen'],
+                    ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable', 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')],
+                    ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Wenn Lux niedriger als ⇒ schalten', 'minimum' => 0, 'maximum' => 100000, 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')]
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
                     ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
@@ -297,6 +299,10 @@ class RoomMotionLightsDev2 extends IPSModule
     /* ================= Lux helpers ================= */
     private function isLuxConfigured(): bool
     {
+        $use = (bool)$this->ReadPropertyBoolean('UseLux');
+        if (!$use) {
+            return false;
+        }
         $vid = (int)$this->ReadPropertyInteger('LuxVar');
         return $vid > 0 && @IPS_VariableExists($vid);
     }
