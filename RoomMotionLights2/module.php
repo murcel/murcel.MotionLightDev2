@@ -10,17 +10,24 @@ class RoomMotionLightsDev2 extends IPSModule
     {
         parent::Create();
 
-        $this->ensureProfiles();
-
         // ---- Properties (from configuration form) ----
         $this->RegisterPropertyString('MotionVars', '[]'); // [{var:int}]
         $this->RegisterPropertyString('Lights', '[]');     // [{switchVar:int}]
         $this->RegisterPropertyInteger('TimeoutSec', 60);
         $this->RegisterPropertyBoolean('StartEnabled', true);
 
+        // Lux (optional)
+        $this->RegisterPropertyInteger('LuxVar', 0); // VariableID eines Helligkeitssensors
+        $this->RegisterPropertyInteger('LuxMax', 50);
+
+        // ---- Profiles ----
+        $this->ensureProfiles();
+
         // ---- Runtime variables ----
         $this->RegisterVariableBoolean('Enabled', 'Bewegungserkennung aktiv', '~Switch', 1);
         $this->EnableAction('Enabled');
+        // Startzustand direkt bei Create setzen
+        @SetValueBoolean($this->GetIDForIdent('Enabled'), (bool)$this->ReadPropertyBoolean('StartEnabled'));
 
         $this->RegisterVariableInteger('CountdownSec', 'Auto-Off Restzeit (s)', 'RMLDEV2.Seconds', 2);
 
@@ -31,22 +38,14 @@ class RoomMotionLightsDev2 extends IPSModule
         // ---- Attributes ----
         $this->RegisterAttributeInteger('AutoOffUntil', 0);
         $this->RegisterAttributeString('RegisteredIDs', '[]');
-        $this->RegisterAttributeBoolean('EnabledInit', false);
     }
 
     public function ApplyChanges()
     {
         parent::ApplyChanges();
 
+        // Profiles sicherstellen (z.B. nach Updates)
         $this->ensureProfiles();
-
-        // Mirror StartEnabled → Enabled only once (first run after install)
-        $enabledVarID = $this->GetIDForIdent('Enabled');
-        $wasInit = (bool)$this->ReadAttributeBoolean('EnabledInit');
-        if ($enabledVarID && IPS_VariableExists($enabledVarID) && !$wasInit) {
-            @SetValueBoolean($enabledVarID, (bool)$this->ReadPropertyBoolean('StartEnabled'));
-            $this->WriteAttributeBoolean('EnabledInit', true);
-        }
 
         // Unregister previous Message subscriptions
         $prev = $this->getRegisteredIDs();
@@ -100,6 +99,10 @@ class RoomMotionLightsDev2 extends IPSModule
                     ]],
                     'add' => true, 'delete' => true
                 ]]],
+                ['type' => 'ExpansionPanel', 'caption' => 'Lux (optional)', 'items' => [
+                    ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable'],
+                    ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Lux-Maximalwert', 'minimum' => 0, 'maximum' => 100000]
+                ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
                     ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
                     ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren']
@@ -143,6 +146,10 @@ class RoomMotionLightsDev2 extends IPSModule
             $mv = (bool)@GetValueBoolean($SenderID);
             // only react on TRUE edges
             if ($mv) {
+                // Lux-Bedingung beachten (nur wenn LuxVar konfiguriert)
+                if ($this->isLuxConfigured() && !$this->isLuxOk()) {
+                    return; // zu hell → nichts schalten
+                }
                 $this->switchLights(true);
                 $this->armAutoOffTimer();
             }
@@ -287,14 +294,48 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->WriteAttributeString('RegisteredIDs', json_encode($ids));
     }
 
+    /* ================= Lux helpers ================= */
+    private function isLuxConfigured(): bool
+    {
+        $vid = (int)$this->ReadPropertyInteger('LuxVar');
+        return $vid > 0 && @IPS_VariableExists($vid);
+    }
+
+    private function getLuxVar(): int
+    {
+        $vid = (int)$this->ReadPropertyInteger('LuxVar');
+        return ($vid > 0 && @IPS_VariableExists($vid)) ? $vid : 0;
+    }
+
+    private function getLuxMax(): int
+    {
+        $v = (int)$this->ReadPropertyInteger('LuxMax');
+        return max(0, $v);
+    }
+
+    private function isLuxOk(): bool
+    {
+        $vid = $this->getLuxVar();
+        if ($vid === 0) {
+            return true; // keine Lux-Variable konfiguriert → Lux egal
+        }
+        $raw = @GetValue($vid);
+        if (!is_numeric($raw)) {
+            return true; // unlesbar → sicherheitshalber nicht blockieren
+        }
+        // Vergleich: aktueller Lux ≤ Schwelle?
+        return ((float)$raw) <= (float)$this->getLuxMax();
+    }
+
+    /* ================= Profiles ================= */
     private function ensureProfiles(): void
     {
-        // Integer seconds with " s" suffix (avoids timezone offset of ~UnixTimestampTime)
+        // Einfaches Sekunden-Profil für Integer: zeigt "XYZ s"
         if (!IPS_VariableProfileExists('RMLDEV2.Seconds')) {
             IPS_CreateVariableProfile('RMLDEV2.Seconds', VARIABLETYPE_INTEGER);
-            IPS_SetVariableProfileText('RMLDEV2.Seconds', '', ' s');
             IPS_SetVariableProfileDigits('RMLDEV2.Seconds', 0);
-            IPS_SetVariableProfileValues('RMLDEV2.Seconds', 0, 86400, 1); // up to 24h
+            IPS_SetVariableProfileText('RMLDEV2.Seconds', '', ' s');
+            IPS_SetVariableProfileValues('RMLDEV2.Seconds', 0, 86400, 1);
         }
     }
 }
