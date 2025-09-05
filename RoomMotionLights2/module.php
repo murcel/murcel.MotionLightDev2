@@ -60,9 +60,43 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterTimer('AutoOff', 0, 'RMLDEV2_AutoOff($_IPS[\'TARGET\']);');
         $this->RegisterTimer('CountdownTick', 0, 'RMLDEV2_CountdownTick($_IPS[\'TARGET\']);');
 
+        // ---- Additional Status Variables ----
+        $this->RegisterVariableBoolean('EffectiveCanAutoOn', 'Auto-Einschalten aktuell erlaubt', 'RMLDEV2.Passed', 9);
+        $this->RegisterVariableInteger('Mode', 'Entscheidungsmodus', 'RMLDEV2.Mode', 10);
+        $this->RegisterVariableString('BlockReason', 'Sperrgrund / Hinweis', '', 11);
+        $this->RegisterVariableBoolean('RequireNeeded', 'Erfordern konfiguriert', 'RMLDEV2.Passed', 12);
+        $this->RegisterVariableInteger('LuxAtDecision', 'Lux beim Entscheid', '', 13);
+        $this->RegisterVariableInteger('InhibitMatchedVar', 'Inhibit: auslösende VarID', '', 14);
+        $this->RegisterVariableInteger('RequireMatchedVar', 'Require: erfüllende VarID', '', 15);
+        $this->RegisterVariableInteger('NextAutoOffTS', 'Nächster Auto-Off', '~UnixTimestamp', 16);
+        $this->RegisterVariableBoolean('AutoOffRunning', 'Auto-Off aktiv', '~Switch', 17);
+        $this->RegisterVariableString('LastDecision', 'Letzte Entscheidung', '', 18);
+        $this->RegisterVariableString('LastAction', 'Letzte Aktion', '', 19);
+        $this->RegisterVariableInteger('LastSwitchSource', 'Letzte Quelle', 'RMLDEV2.Source', 20);
+        $this->RegisterVariableInteger('LastDimTargetPct', 'Letzter Ziel-Dimm (%)', '~Intensity.100', 21);
+        $this->RegisterVariableString('DecisionJSON', 'Diagnose JSON', '', 22);
+        $this->RegisterVariableString('EventLog', 'Ereignis-Log (letzte 20)', '', 23);
+
         // ---- Attributes ----
         $this->RegisterAttributeInteger('AutoOffUntil', 0);
         $this->RegisterAttributeString('RegisteredIDs', '[]');
+
+        // ---- Initial Defaults ----
+        @SetValueBoolean($this->GetIDForIdent('EffectiveCanAutoOn'), false);
+        @SetValueInteger($this->GetIDForIdent('Mode'), 4);
+        @SetValueString($this->GetIDForIdent('BlockReason'), '(Init)');
+        @SetValueBoolean($this->GetIDForIdent('RequireNeeded'), false);
+        @SetValueInteger($this->GetIDForIdent('LuxAtDecision'), 0);
+        @SetValueInteger($this->GetIDForIdent('InhibitMatchedVar'), 0);
+        @SetValueInteger($this->GetIDForIdent('RequireMatchedVar'), 0);
+        @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), 0);
+        @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), false);
+        @SetValueString($this->GetIDForIdent('LastDecision'), '');
+        @SetValueString($this->GetIDForIdent('LastAction'), 'none');
+        @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 0);
+        @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), 0);
+        @SetValueString($this->GetIDForIdent('DecisionJSON'), '{}');
+        @SetValueString($this->GetIDForIdent('EventLog'), '');
     }
 
     public function ApplyChanges()
@@ -139,6 +173,8 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->SetTimerInterval('CountdownTick', 0);
         $this->WriteAttributeInteger('AutoOffUntil', 0);
         @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
+        @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), false);
+        @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), 0);
 
         @SetValueInteger($this->GetIDForIdent('Set_TimeoutSec'), max(5, min(3600, (int)$this->ReadPropertyInteger('TimeoutSec'))));
         @SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), max(1, min(100, (int)$this->ReadPropertyInteger('DefaultDimPct'))));
@@ -248,6 +284,8 @@ class RoomMotionLightsDev2 extends IPSModule
                     $this->SetTimerInterval('CountdownTick', 0);
                     $this->WriteAttributeInteger('AutoOffUntil', 0);
                     @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
+                    @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), false);
+                    @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), 0);
                 }
                 $this->updateStatusIndicators();
                 break;
@@ -289,12 +327,23 @@ class RoomMotionLightsDev2 extends IPSModule
             $mv = (bool)@GetValueBoolean($SenderID);
             // only react on TRUE edges
             if ($mv) {
-                if (!$this->shouldAllowAutoOn()) {
-                    return; // Bedingungen nicht erfüllt -> weder schalten noch Counter starten
+                $ev = $this->evaluateAutoOn();
+                if ($ev['canAutoOn']) {
+                    $this->switchLights(true);
+                    $this->armAutoOffTimer();
+                    $targetPct = $this->ReadPropertyBoolean('UseDefaultDim') ? $this->getDefaultDimPct() : 0;
+                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Bewegung erkannt → Licht an (Ziel '.$targetPct.'%)');
+                    @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
+                    @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 1);
+                    @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), $targetPct);
+                    $this->writeDecision($ev + ['event'=>'motion_true','action'=>'on','targetPct'=>$targetPct]);
+                } else {
+                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Bewegung erkannt → kein Einschalten: '.$ev['reason']);
+                    @SetValueString($this->GetIDForIdent('LastAction'), 'none');
+                    @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 1);
+                    @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), 0);
+                    $this->writeDecision($ev + ['event'=>'motion_true','action'=>'none']);
                 }
-                $this->switchLights(true);
-                // Counter nur nach erfolgreichem Einschalten
-                $this->armAutoOffTimer();
                 $this->updateStatusIndicators();
             }
             return;
@@ -309,9 +358,15 @@ class RoomMotionLightsDev2 extends IPSModule
                 $on = (bool)@GetValueBoolean($sv);
                 if ($on) {
                     // Nur wenn gewünscht und Bedingungen erfüllt
+                    $armed = false;
                     if ($this->ReadPropertyBoolean('AutoOffOnManual') && $this->shouldAllowAutoOff()) {
                         $this->armAutoOffIfIdle();
+                        $armed = true;
                     }
+                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Manuell eingeschaltet → '.($armed ? 'Timer gestartet' : 'kein Timer'));
+                    @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
+                    @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 2);
+                    $this->writeDecision(['event'=>'manual_switch_on','action'=>'on','timerArmed'=>$armed]);
                 } else {
                     // Beim manuellen Ausschalten Timer nur stoppen, wenn keine Bewegung mehr aktiv
                     if (!$this->isAnyMotionActive()) {
@@ -319,6 +374,11 @@ class RoomMotionLightsDev2 extends IPSModule
                         $this->SetTimerInterval('CountdownTick', 0);
                         $this->WriteAttributeInteger('AutoOffUntil', 0);
                         @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
+                        @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), false);
+                        @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), 0);
+                        @SetValueString($this->GetIDForIdent('LastAction'), 'OFF');
+                        @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 2);
+                        $this->writeDecision(['event'=>'manual_switch_off','action'=>'off']);
                     }
                 }
                 return;
@@ -334,6 +394,10 @@ class RoomMotionLightsDev2 extends IPSModule
                 }
                 if ($anyOn && $this->ReadPropertyBoolean('AutoOffOnManual') && $this->shouldAllowAutoOff()) {
                     $this->armAutoOffIfIdle();
+                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Manuell gedimmt → Timer gestartet');
+                    @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
+                    @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 2);
+                    $this->writeDecision(['event'=>'manual_dim','action'=>'on','timerArmed'=>true]);
                 }
                 return;
             }
@@ -350,6 +414,12 @@ class RoomMotionLightsDev2 extends IPSModule
             $this->SetTimerInterval('CountdownTick', 0);
             $this->WriteAttributeInteger('AutoOffUntil', 0);
             @SetValueInteger($this->GetIDForIdent('CountdownSec'), 0);
+            @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), false);
+            @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), 0);
+            @SetValueString($this->GetIDForIdent('LastDecision'), 'Auto-Off → Lichter aus');
+            @SetValueString($this->GetIDForIdent('LastAction'), 'OFF');
+            @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 3);
+            $this->writeDecision(['event'=>'autooff','action'=>'off']);
         } else {
             // Still motion → re-arm full timeout
             $this->armAutoOffTimer();
@@ -380,6 +450,8 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->SetTimerInterval('AutoOff', $timeout * 1000);
         $this->SetTimerInterval('CountdownTick', 1000);
         @SetValueInteger($this->GetIDForIdent('CountdownSec'), $timeout);
+        @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), $until);
+        @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), true);
         $this->updateStatusIndicators();
     }
 
@@ -396,23 +468,140 @@ class RoomMotionLightsDev2 extends IPSModule
     /* ================= Status Indicator Update ================= */
     private function updateStatusIndicators(): void
     {
-        // Inhibit
-        $roomInhibit  = $this->anyTrue($this->getBoolVarList('RoomInhibit'));
-        $houseInhibit = $this->anyTrue($this->getBoolVarList('HouseInhibit'));
+        $ev = $this->evaluateAutoOn();
+        @SetValueBoolean($this->GetIDForIdent('RoomInhibitActive'), $ev['roomInhibit']);
+        @SetValueBoolean($this->GetIDForIdent('HouseInhibitActive'), $ev['houseInhibit']);
+        @SetValueBoolean($this->GetIDForIdent('RequireSatisfied'), $ev['requireSatisfied']);
+        @SetValueBoolean($this->GetIDForIdent('LuxOK'), $ev['luxOk']);
+        @SetValueBoolean($this->GetIDForIdent('EffectiveCanAutoOn'), $ev['canAutoOn']);
+        @SetValueInteger($this->GetIDForIdent('Mode'), $ev['mode']);
+        @SetValueString($this->GetIDForIdent('BlockReason'), $ev['reason']);
+        @SetValueBoolean($this->GetIDForIdent('RequireNeeded'), $ev['requireNeeded']);
+        @SetValueInteger($this->GetIDForIdent('InhibitMatchedVar'), $ev['inhibitMatched']);
+        @SetValueInteger($this->GetIDForIdent('RequireMatchedVar'), $ev['requireMatched']);
+        if ($ev['luxUsed'] && !is_null($ev['luxValue'])) {
+            @SetValueInteger($this->GetIDForIdent('LuxAtDecision'), (int)$ev['luxValue']);
+        } else {
+            @SetValueInteger($this->GetIDForIdent('LuxAtDecision'), 0);
+        }
+        // AutoOffRunning, NextAutoOffTS
+        $autoOffUntil = (int)$this->ReadAttributeInteger('AutoOffUntil');
+        @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), $autoOffUntil > time());
+        @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), $autoOffUntil);
+    }
+    /**
+     * Returns the first id in the list with boolean value TRUE, or 0 if none.
+     */
+    private function getFirstTrue(array $ids): int
+    {
+        foreach ($ids as $id) {
+            if (@GetValueBoolean($id)) {
+                return $id;
+            }
+        }
+        return 0;
+    }
 
-        // Require (erzwingen)
-        $roomReq  = $this->getBoolVarList('RoomRequire');
-        $houseReq = $this->getBoolVarList('HouseRequire');
-        $requireNeeded = (count($roomReq) + count($houseReq)) > 0;
-        $requireOK = !$requireNeeded || ($this->anyTrue($roomReq) || $this->anyTrue($houseReq));
+    /**
+     * Evaluates all gating and returns array with keys:
+     *  roomInhibit, houseInhibit, inhibitMatched, roomRequire, houseRequire,
+     *  requireNeeded, requireSatisfied, requireMatched,
+     *  luxUsed, luxValue, luxOk, canAutoOn, mode, reason
+     */
+    private function evaluateAutoOn(): array
+    {
+        $roomInhibitList = $this->getBoolVarList('RoomInhibit');
+        $houseInhibitList = $this->getBoolVarList('HouseInhibit');
+        $roomRequireList = $this->getBoolVarList('RoomRequire');
+        $houseRequireList = $this->getBoolVarList('HouseRequire');
+        $roomInhibit = $this->anyTrue($roomInhibitList);
+        $houseInhibit = $this->anyTrue($houseInhibitList);
+        $inhibitMatched = $this->getFirstTrue(array_merge($roomInhibitList, $houseInhibitList));
+        $requireNeeded = (count($roomRequireList) + count($houseRequireList)) > 0;
+        $requireSatisfied = $this->anyTrue($roomRequireList) || $this->anyTrue($houseRequireList);
+        $requireMatched = $this->getFirstTrue(array_merge($roomRequireList, $houseRequireList));
+        $luxUsed = $this->isLuxConfigured();
+        $luxValue = null;
+        if ($luxUsed) {
+            $luxVar = $this->getLuxVar();
+            $luxValue = $luxVar > 0 ? (int)@GetValue($luxVar) : null;
+        }
+        $luxOk = (!$luxUsed) || ($luxValue !== null && $luxValue <= $this->getLuxMax());
+        // Decision
+        $mode = 0;
+        $canAutoOn = true;
+        $reason = 'OK';
+        if (!$this->isEnabled()) {
+            $mode = 4;
+            $canAutoOn = false;
+            $reason = 'Instanz deaktiviert';
+        } elseif ($roomInhibit || $houseInhibit) {
+            $mode = 1;
+            $canAutoOn = false;
+            $reason = 'Inhibit aktiv (VarID=' . $inhibitMatched . ')';
+        } elseif ($requireNeeded && !$requireSatisfied) {
+            $mode = 2;
+            $canAutoOn = false;
+            $reason = 'Require nicht erfüllt';
+        } elseif ($luxUsed && !$luxOk) {
+            $mode = 3;
+            $canAutoOn = false;
+            $reason = 'Lux zu hoch (' . $luxValue . '>' . $this->getLuxMax() . ')';
+        }
+        return [
+            'roomInhibit' => $roomInhibit,
+            'houseInhibit' => $houseInhibit,
+            'inhibitMatched' => $inhibitMatched,
+            'roomRequire' => $roomRequireList,
+            'houseRequire' => $houseRequireList,
+            'requireNeeded' => $requireNeeded,
+            'requireSatisfied' => $requireSatisfied,
+            'requireMatched' => $requireMatched,
+            'luxUsed' => $luxUsed,
+            'luxValue' => $luxValue,
+            'luxOk' => $luxOk,
+            'canAutoOn' => $canAutoOn,
+            'mode' => $mode,
+            'reason' => $reason
+        ];
+    }
 
-        // Lux
-        $luxOK = !$this->isLuxConfigured() || $this->isLuxOk();
+    /**
+     * Appends an event log line, prepending timestamp, and trims to last 20 lines.
+     */
+    private function appendEventLog(string $line): void
+    {
+        $ts = date('H:i:s');
+        $entry = $ts . ' ' . $line;
+        $id = $this->GetIDForIdent('EventLog');
+        $prev = @GetValueString($id);
+        $lines = array_filter(explode("\n", (string)$prev), 'strlen');
+        $lines[] = $entry;
+        // keep only last 20
+        $lines = array_slice($lines, -20);
+        @SetValueString($id, implode("\n", $lines));
+    }
 
-        @SetValueBoolean($this->GetIDForIdent('RoomInhibitActive'), $roomInhibit);
-        @SetValueBoolean($this->GetIDForIdent('HouseInhibitActive'), $houseInhibit);
-        @SetValueBoolean($this->GetIDForIdent('RequireSatisfied'), $requireOK);
-        @SetValueBoolean($this->GetIDForIdent('LuxOK'), $luxOK);
+    /**
+     * Stores decision array as JSON and appends a short log entry.
+     */
+    private function writeDecision(array $ev): void
+    {
+        @SetValueString($this->GetIDForIdent('DecisionJSON'), json_encode($ev, JSON_UNESCAPED_UNICODE));
+        $short = '';
+        if (isset($ev['event'])) {
+            $short .= $ev['event'];
+        }
+        if (isset($ev['action'])) {
+            $short .= ' → ' . $ev['action'];
+        }
+        if (isset($ev['targetPct'])) {
+            $short .= ' (' . $ev['targetPct'] . '%)';
+        }
+        if (isset($ev['reason'])) {
+            $short .= ' [' . $ev['reason'] . ']';
+        }
+        $this->appendEventLog(trim($short));
     }
 
     /* ================= Helpers ================= */
@@ -718,6 +907,24 @@ class RoomMotionLightsDev2 extends IPSModule
             IPS_SetVariableProfileDigits('RMLDEV2.TimeoutSec', 0);
             IPS_SetVariableProfileText('RMLDEV2.TimeoutSec', '', ' s');
             IPS_SetVariableProfileValues('RMLDEV2.TimeoutSec', 5, 3600, 5);
+        }
+
+        // Integer profile for Mode
+        if (!IPS_VariableProfileExists('RMLDEV2.Mode')) {
+            IPS_CreateVariableProfile('RMLDEV2.Mode', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 0, 'OK', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 1, 'Inhibit', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 2, 'Require fehlt', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 3, 'Lux zu hoch', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 4, 'Deaktiviert', '', -1);
+        }
+        // Integer profile for Source
+        if (!IPS_VariableProfileExists('RMLDEV2.Source')) {
+            IPS_CreateVariableProfile('RMLDEV2.Source', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Source', 0, 'keine', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Source', 1, 'Bewegung', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Source', 2, 'Manuell', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Source', 3, 'Timer', '', -1);
         }
     }
 }
