@@ -51,9 +51,9 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->EnableAction('Set_DefaultDim');
 
         // Status-Indicatoren (read-only)
-        $this->RegisterVariableBoolean('RoomInhibitActive', 'Raum-Inhibit aktiv', 'RMLDEV2.Block', 3);
-        $this->RegisterVariableBoolean('HouseInhibitActive', 'Haus-Inhibit aktiv', 'RMLDEV2.Block', 4);
-        $this->RegisterVariableBoolean('RequireSatisfied', 'Erfordern erfüllt/OK', 'RMLDEV2.Passed', 5);
+        $this->RegisterVariableBoolean('RoomInhibitActive', 'Raum-Blocker aktiv', 'RMLDEV2.Block', 3);
+        $this->RegisterVariableBoolean('HouseInhibitActive', 'Haus-Blocker aktiv', 'RMLDEV2.Block', 4);
+        $this->RegisterVariableBoolean('RequireSatisfied', 'Freigabe erfüllt/OK', 'RMLDEV2.Passed', 5);
         $this->RegisterVariableBoolean('LuxOK', 'Lux-Bedingung OK', 'RMLDEV2.Passed', 6);
 
         // ---- Timers ----
@@ -61,10 +61,10 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterTimer('CountdownTick', 0, 'RMLDEV2_CountdownTick($_IPS[\'TARGET\']);');
 
         // ---- Additional Status Variables ----
-        $this->RegisterVariableBoolean('EffectiveCanAutoOn', 'Auto-Einschalten aktuell erlaubt', 'RMLDEV2.Passed', 9);
+        $this->RegisterVariableBoolean('EffectiveCanAutoOn', 'Auto-Einschalten erlaubt', 'RMLDEV2.Passed', 9);
         $this->RegisterVariableInteger('Mode', 'Entscheidungsmodus', 'RMLDEV2.Mode', 10);
         $this->RegisterVariableString('BlockReason', 'Sperrgrund / Hinweis', '', 11);
-        $this->RegisterVariableBoolean('RequireNeeded', 'Erfordern konfiguriert', 'RMLDEV2.Passed', 12);
+        $this->RegisterVariableBoolean('RequireNeeded', 'Freigaben konfiguriert', 'RMLDEV2.Passed', 12);
         $this->RegisterVariableInteger('LuxAtDecision', 'Lux beim Entscheid', '', 13);
         $this->RegisterVariableInteger('InhibitMatchedVar', 'Inhibit: auslösende VarID', '', 14);
         $this->RegisterVariableInteger('RequireMatchedVar', 'Require: erfüllende VarID', '', 15);
@@ -220,31 +220,31 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable', 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')],
                     ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Wenn Lux niedriger als ⇒ schalten', 'minimum' => 0, 'maximum' => 100000, 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')]
                 ]],
-                ['type' => 'ExpansionPanel', 'caption' => 'Statusbedingungen (Raum & Haus)', 'items' => [
-                    ['type' => 'Label', 'caption' => 'Nicht auslösen, wenn TRUE'],
-                    ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Inhibit',
+                ['type' => 'ExpansionPanel', 'caption' => 'Bedingungen: Blocker & Freigaben', 'items' => [
+                    ['type' => 'Label', 'caption' => 'Blocker (nicht schalten bei TRUE)'],
+                    ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Blocker',
                         'columns' => [[
                             'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
-                    ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Inhibit',
+                    ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Blocker',
                         'columns' => [[
                             'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
-                    ['type' => 'Label', 'caption' => 'Nur auslösen, wenn TRUE ("erzwingen")'],
-                    ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Erfordern',
+                    ['type' => 'Label', 'caption' => 'Freigaben (nur schalten bei TRUE)'],
+                    ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Freigaben',
                         'columns' => [[
                             'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
                         ]],
                         'add' => true, 'delete' => true
                     ],
-                    ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Erfordern',
+                    ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Freigaben',
                         'columns' => [[
                             'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                             'add' => 0, 'edit' => ['type' => 'SelectVariable']
@@ -538,11 +538,11 @@ class RoomMotionLightsDev2 extends IPSModule
         } elseif ($roomInhibit || $houseInhibit) {
             $mode = 1;
             $canAutoOn = false;
-            $reason = 'Inhibit aktiv (VarID=' . $inhibitMatched . ')';
+            $reason = 'Blocker aktiv (VarID=' . $inhibitMatched . ')';
         } elseif ($requireNeeded && !$requireSatisfied) {
             $mode = 2;
             $canAutoOn = false;
-            $reason = 'Require nicht erfüllt';
+            $reason = 'Freigabe fehlt';
         } elseif ($luxUsed && !$luxOk) {
             $mode = 3;
             $canAutoOn = false;
@@ -891,8 +891,8 @@ class RoomMotionLightsDev2 extends IPSModule
         // Boolean profile: Passed/OK (TRUE=OK, FALSE=nicht erfüllt)
         if (!IPS_VariableProfileExists('RMLDEV2.Passed')) {
             IPS_CreateVariableProfile('RMLDEV2.Passed', VARIABLETYPE_BOOLEAN);
-            IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 0, 'nicht erfüllt', '', -1);
-            IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 1, 'OK', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 0, 'Freigabe fehlt', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 1, 'Freigabe OK', '', -1);
         }
         // Einfaches Sekunden-Profil für Integer: zeigt "XYZ s"
         if (!IPS_VariableProfileExists('RMLDEV2.Seconds')) {
@@ -913,8 +913,8 @@ class RoomMotionLightsDev2 extends IPSModule
         if (!IPS_VariableProfileExists('RMLDEV2.Mode')) {
             IPS_CreateVariableProfile('RMLDEV2.Mode', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 0, 'OK', '', -1);
-            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 1, 'Inhibit', '', -1);
-            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 2, 'Require fehlt', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 1, 'Blocker', '', -1);
+            IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 2, 'Freigabe fehlt', '', -1);
             IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 3, 'Lux zu hoch', '', -1);
             IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 4, 'Deaktiviert', '', -1);
         }
