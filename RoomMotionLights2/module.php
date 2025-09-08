@@ -977,7 +977,6 @@ class RoomMotionLightsDev2 extends IPSModule
             IPS_SetVariableProfileAssociation('RMLDEV2.Source', 3, 'Timer', '', -1);
         }
     }
-}
     /* ================= Adaptive Learning (Step 1: storage & effective threshold) ================= */
     private function initLearningIfNeeded(): void
     {
@@ -1055,3 +1054,5 @@ class RoomMotionLightsDev2 extends IPSModule
         // Effective threshold & window
         $this->getEffectiveLuxThreshold();
     }
+
+}
