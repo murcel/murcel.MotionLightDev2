@@ -19,7 +19,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterPropertyBoolean('StartEnabled', true);
         $this->RegisterPropertyBoolean('AutoOffOnManual', false);
 
-        // Status-Variablen (Raum/Haus; Inhibit/Require)
+        // Status-Variablen (Raum/Haus; Blocker/Freigaben)
         $this->RegisterPropertyString('RoomInhibit', '[]');  // [{var:int}]
         $this->RegisterPropertyString('HouseInhibit', '[]'); // [{var:int}]
         $this->RegisterPropertyString('RoomRequire', '[]');  // [{var:int}]
@@ -30,6 +30,11 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterPropertyInteger('LuxMax', 50);
         $this->RegisterPropertyBoolean('UseLux', true);
 
+        // Adaptive Lux Learning
+        $this->RegisterPropertyBoolean('AdaptiveEnabled', false);
+        $this->RegisterPropertyInteger('AdaptiveDelta', 3);       // Schrittweite (Lux)
+        $this->RegisterPropertyInteger('AdaptiveWindowSec', 60);  // Feedback-Fenster in Sekunden
+
         // ---- Profiles ----
         $this->ensureProfiles();
 
@@ -39,7 +44,6 @@ class RoomMotionLightsDev2 extends IPSModule
         // ---- Runtime variables ----
         $this->RegisterVariableBoolean('Enabled', 'Bewegungserkennung aktiv', '~Switch', 1);
         $this->EnableAction('Enabled');
-        // Startzustand direkt bei Create setzen
         @SetValueBoolean($this->GetIDForIdent('Enabled'), (bool)$this->ReadPropertyBoolean('StartEnabled'));
 
         $this->RegisterVariableInteger('CountdownSec', 'Auto-Off Restzeit (s)', 'RMLDEV2.Seconds', 2);
@@ -49,6 +53,7 @@ class RoomMotionLightsDev2 extends IPSModule
 
         $this->RegisterVariableInteger('Set_DefaultDim', 'Standard-Helligkeit (%)', '~Intensity.100', 8);
         $this->EnableAction('Set_DefaultDim');
+
         // Lux-Schwelle als Variable für IPSView
         $this->RegisterVariableInteger('Set_LuxMax', 'Lux-Schwelle (≤)', '', 24);
         $this->EnableAction('Set_LuxMax');
@@ -81,9 +86,21 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterVariableString('DecisionJSON', 'Diagnose JSON', '', 22);
         $this->RegisterVariableString('EventLog', 'Ereignis-Log (letzte 20)', '', 23);
 
+        // ---- Adaptive diagnostics (read-only) ----
+        $this->RegisterVariableInteger('LearnedLux', 'Gelernter Lux-Schwellenwert', '', 25);
+        $this->RegisterVariableInteger('LearnConfidence', 'Lern-Sicherheit (%)', '~Intensity.100', 26);
+        $this->RegisterVariableString('LastFeedback', 'Letztes Nutzer-Feedback', '', 27);
+        $this->RegisterVariableInteger('Samples', 'Anzahl Lernereignisse', '', 28);
+
         // ---- Attributes ----
         $this->RegisterAttributeInteger('AutoOffUntil', 0);
         $this->RegisterAttributeString('RegisteredIDs', '[]');
+
+        // Adaptive attributes
+        $this->RegisterAttributeInteger('LastDecisionTS', 0);
+        $this->RegisterAttributeString('LastDecisionType', ''); // 'auto_on' | 'blocked_lux'
+        $this->RegisterAttributeInteger('LastDecisionLux', -1);
+        $this->RegisterAttributeInteger('LastThreshold', -1);
 
         // ---- Initial Defaults ----
         @SetValueBoolean($this->GetIDForIdent('EffectiveCanAutoOn'), false);
@@ -184,6 +201,16 @@ class RoomMotionLightsDev2 extends IPSModule
         @SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), max(1, min(100, (int)$this->ReadPropertyInteger('DefaultDimPct'))));
         @SetValueInteger($this->GetIDForIdent('Set_LuxMax'), max(0, (int)$this->ReadPropertyInteger('LuxMax')));
 
+        // Initialize/Clamp adaptive indicators
+        $learnLuxID   = $this->GetIDForIdent('LearnedLux');
+        $currentLearn = (int)@GetValueInteger($learnLuxID);
+        $base         = (int)$this->ReadPropertyInteger('LuxMax');
+        if ($currentLearn <= 0) {
+            @SetValueInteger($learnLuxID, max(0, $base));
+        }
+        @SetValueInteger($this->GetIDForIdent('LearnConfidence'), min(100, max(0, (int)@GetValueInteger($this->GetIDForIdent('LearnConfidence')))));
+        @SetValueInteger($this->GetIDForIdent('Samples'), max(0, (int)@GetValueInteger($this->GetIDForIdent('Samples'))));
+
         $this->updateStatusIndicators();
     }
 
@@ -224,6 +251,12 @@ class RoomMotionLightsDev2 extends IPSModule
                     ['type' => 'CheckBox', 'name' => 'UseLux', 'caption' => 'Lux berücksichtigen'],
                     ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable', 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')],
                     ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Wenn Lux niedriger als ⇒ schalten', 'minimum' => 0, 'maximum' => 100000, 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')]
+                ]],
+                ['type' => 'ExpansionPanel', 'caption' => 'Adaptives Lernen (Lux)', 'items' => [
+                    ['type' => 'CheckBox', 'name' => 'AdaptiveEnabled', 'caption' => 'Adaptives Lernen aktiv'],
+                    ['type' => 'NumberSpinner', 'name' => 'AdaptiveDelta', 'caption' => 'Schrittweite je Feedback (Lux)', 'minimum' => 1, 'maximum' => 100],
+                    ['type' => 'NumberSpinner', 'name' => 'AdaptiveWindowSec', 'caption' => 'Feedback-Fenster (Sekunden)', 'minimum' => 10, 'maximum' => 600],
+                    ['type' => 'Label', 'caption' => 'Hinweis: Lernen wirkt nur, wenn Lux berücksichtigt wird und keine Blocker aktiv sind.']
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Bedingungen: Blocker & Freigaben', 'items' => [
                     ['type' => 'Label', 'caption' => 'Blocker (nicht schalten bei TRUE)'],
@@ -271,6 +304,21 @@ class RoomMotionLightsDev2 extends IPSModule
                     'type'    => 'Button',
                     'caption' => 'Debug Snapshot ausgeben',
                     'onClick' => 'RMLDEV2_DebugDump($id);'
+                ],
+                [
+                    'type'    => 'Button',
+                    'caption' => 'Adaptiv: Zurücksetzen',
+                    'onClick' => 'RMLDEV2_AdaptiveReset($id);'
+                ],
+                [
+                    'type'    => 'Button',
+                    'caption' => 'Adaptiv: Schwelle +',
+                    'onClick' => 'RMLDEV2_AdaptiveNudgeUp($id);'
+                ],
+                [
+                    'type'    => 'Button',
+                    'caption' => 'Adaptiv: Schwelle −',
+                    'onClick' => 'RMLDEV2_AdaptiveNudgeDown($id);'
                 ]
             ],
             'status'   => []
@@ -297,7 +345,6 @@ class RoomMotionLightsDev2 extends IPSModule
             case 'Set_TimeoutSec':
                 $val = max(5, min(3600, (int)$Value));
                 SetValueInteger($this->GetIDForIdent('Set_TimeoutSec'), $val);
-                // Wenn Timer aktiv ist, neu armieren
                 if ($this->ReadAttributeInteger('AutoOffUntil') > time()) {
                     $this->armAutoOffTimer();
                 }
@@ -311,6 +358,15 @@ class RoomMotionLightsDev2 extends IPSModule
                 SetValueInteger($this->GetIDForIdent('Set_LuxMax'), $val);
                 IPS_SetProperty($this->InstanceID, 'LuxMax', $val);
                 IPS_ApplyChanges($this->InstanceID);
+                break;
+            case 'AdaptiveReset':
+                $this->AdaptiveReset();
+                break;
+            case 'AdaptiveNudgeUp':
+                $this->AdaptiveNudgeUp();
+                break;
+            case 'AdaptiveNudgeDown':
+                $this->AdaptiveNudgeDown();
                 break;
             case 'DebugDump':
                 $this->DebugDump();
@@ -336,19 +392,28 @@ class RoomMotionLightsDev2 extends IPSModule
         // Movement?
         if (in_array($SenderID, $this->getMotionVars(), true)) {
             $mv = (bool)@GetValueBoolean($SenderID);
-            // only react on TRUE edges
             if ($mv) {
                 $ev = $this->evaluateAutoOn();
                 if ($ev['canAutoOn']) {
                     $this->switchLights(true);
                     $this->armAutoOffTimer();
+                    $threshold = (int)$ev['threshold'];
+                    $luxAt = is_null($ev['luxValue']) ? null : (int)$ev['luxValue'];
+                    $this->recordDecision('auto_on', $luxAt, $threshold);
+
                     $targetPct = $this->ReadPropertyBoolean('UseDefaultDim') ? $this->getDefaultDimPct() : 0;
                     @SetValueString($this->GetIDForIdent('LastDecision'), 'Bewegung erkannt → Licht an (Ziel '.$targetPct.'%)');
                     @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
                     @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 1);
                     @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), $targetPct);
-                    $this->writeDecision($ev + ['event'=>'motion_true','action'=>'on','targetPct'=>$targetPct]);
+                    $this->writeDecision($ev + ['event'=>'motion_true','action'=>'on','targetPct'=>$targetPct,'threshold'=>$threshold]);
                 } else {
+                    // Wenn wegen Lux blockiert, Entscheidung mitspeichern (für Lernen)
+                    if ($ev['mode'] === 3) {
+                        $threshold = (int)$ev['threshold'];
+                        $luxAt = is_null($ev['luxValue']) ? null : (int)$ev['luxValue'];
+                        $this->recordDecision('blocked_lux', $luxAt, $threshold);
+                    }
                     @SetValueString($this->GetIDForIdent('LastDecision'), 'Bewegung erkannt → kein Einschalten: '.$ev['reason']);
                     @SetValueString($this->GetIDForIdent('LastAction'), 'none');
                     @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 1);
@@ -378,6 +443,13 @@ class RoomMotionLightsDev2 extends IPSModule
                     @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
                     @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 2);
                     $this->writeDecision(['event'=>'manual_switch_on','action'=>'on','timerArmed'=>$armed]);
+
+                    // Adaptive learn: manual ON nach lux-blockiertem Entscheid
+                    if ($this->ReadPropertyBoolean('AdaptiveEnabled') && $this->withinAdaptiveWindow() && $this->ReadAttributeString('LastDecisionType') === 'blocked_lux') {
+                        if ($this->shouldAllowAutoOff()) { // kein Blocker/Freigaben-Check wie bei AutoOff
+                            $this->learnFromManualOnAfterBlocked();
+                        }
+                    }
                 } else {
                     // Beim manuellen Ausschalten Timer nur stoppen, wenn keine Bewegung mehr aktiv
                     if (!$this->isAnyMotionActive()) {
@@ -390,6 +462,10 @@ class RoomMotionLightsDev2 extends IPSModule
                         @SetValueString($this->GetIDForIdent('LastAction'), 'OFF');
                         @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 2);
                         $this->writeDecision(['event'=>'manual_switch_off','action'=>'off']);
+                    }
+                    // Adaptive learn: manual OFF kurz nach Auto-ON
+                    if ($this->ReadPropertyBoolean('AdaptiveEnabled') && $this->withinAdaptiveWindow() && $this->ReadAttributeString('LastDecisionType') === 'auto_on') {
+                        $this->learnFromManualOffAfterAutoOn();
                     }
                 }
                 return;
@@ -418,7 +494,6 @@ class RoomMotionLightsDev2 extends IPSModule
     /* ================= Timers ================= */
     public function AutoOff(): void
     {
-        // Only switch off when no motion active anymore
         if (!$this->isAnyMotionActive()) {
             $this->switchLights(false);
             $this->SetTimerInterval('AutoOff', 0);
@@ -432,7 +507,6 @@ class RoomMotionLightsDev2 extends IPSModule
             @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 3);
             $this->writeDecision(['event'=>'autooff','action'=>'off']);
         } else {
-            // Still motion → re-arm full timeout
             $this->armAutoOffTimer();
         }
         $this->updateStatusIndicators();
@@ -472,7 +546,6 @@ class RoomMotionLightsDev2 extends IPSModule
         if ($current <= time()) {
             $this->armAutoOffTimer();
         }
-        // if still running, do nothing to avoid chattering
         $this->updateStatusIndicators();
     }
 
@@ -495,11 +568,11 @@ class RoomMotionLightsDev2 extends IPSModule
         } else {
             @SetValueInteger($this->GetIDForIdent('LuxAtDecision'), 0);
         }
-        // AutoOffRunning, NextAutoOffTS
         $autoOffUntil = (int)$this->ReadAttributeInteger('AutoOffUntil');
         @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), $autoOffUntil > time());
         @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), $autoOffUntil);
     }
+
     /**
      * Returns the first id in the list with boolean value TRUE, or 0 if none.
      */
@@ -514,10 +587,10 @@ class RoomMotionLightsDev2 extends IPSModule
     }
 
     /**
-     * Evaluates all gating and returns array with keys:
+     * Evaluates all gating and returns array:
      *  roomInhibit, houseInhibit, inhibitMatched, roomRequire, houseRequire,
      *  requireNeeded, requireSatisfied, requireMatched,
-     *  luxUsed, luxValue, luxOk, canAutoOn, mode, reason
+     *  luxUsed, luxValue, luxOk, canAutoOn, mode, reason, threshold
      */
     private function evaluateAutoOn(): array
     {
@@ -525,19 +598,24 @@ class RoomMotionLightsDev2 extends IPSModule
         $houseInhibitList = $this->getBoolVarList('HouseInhibit');
         $roomRequireList = $this->getBoolVarList('RoomRequire');
         $houseRequireList = $this->getBoolVarList('HouseRequire');
+
         $roomInhibit = $this->anyTrue($roomInhibitList);
         $houseInhibit = $this->anyTrue($houseInhibitList);
         $inhibitMatched = $this->getFirstTrue(array_merge($roomInhibitList, $houseInhibitList));
+
         $requireNeeded = (count($roomRequireList) + count($houseRequireList)) > 0;
         $requireSatisfied = $this->anyTrue($roomRequireList) || $this->anyTrue($houseRequireList);
         $requireMatched = $this->getFirstTrue(array_merge($roomRequireList, $houseRequireList));
+
         $luxUsed = $this->isLuxConfigured();
         $luxValue = null;
+        $threshold = $this->getEffectiveLuxThreshold();
         if ($luxUsed) {
             $luxVar = $this->getLuxVar();
             $luxValue = $luxVar > 0 ? (int)@GetValue($luxVar) : null;
         }
-        $luxOk = (!$luxUsed) || ($luxValue !== null && $luxValue <= $this->getLuxMax());
+        $luxOk = (!$luxUsed) || ($luxValue !== null && $luxValue <= $threshold);
+
         // Decision
         $mode = 0;
         $canAutoOn = true;
@@ -557,7 +635,7 @@ class RoomMotionLightsDev2 extends IPSModule
         } elseif ($luxUsed && !$luxOk) {
             $mode = 3;
             $canAutoOn = false;
-            $reason = 'Lux zu hoch (' . $luxValue . '>' . $this->getLuxMax() . ')';
+            $reason = 'Lux zu hoch (' . $luxValue . '>' . $threshold . ')';
         }
         return [
             'roomInhibit' => $roomInhibit,
@@ -573,7 +651,8 @@ class RoomMotionLightsDev2 extends IPSModule
             'luxOk' => $luxOk,
             'canAutoOn' => $canAutoOn,
             'mode' => $mode,
-            'reason' => $reason
+            'reason' => $reason,
+            'threshold' => $threshold
         ];
     }
 
@@ -588,7 +667,6 @@ class RoomMotionLightsDev2 extends IPSModule
         $prev = @GetValueString($id);
         $lines = array_filter(explode("\n", (string)$prev), 'strlen');
         $lines[] = $entry;
-        // keep only last 20
         $lines = array_slice($lines, -20);
         @SetValueString($id, implode("\n", $lines));
     }
@@ -611,6 +689,9 @@ class RoomMotionLightsDev2 extends IPSModule
         }
         if (isset($ev['reason'])) {
             $short .= ' [' . $ev['reason'] . ']';
+        }
+        if (isset($ev['threshold'])) {
+            $short .= ' thr=' . $ev['threshold'];
         }
         $this->appendEventLog(trim($short));
     }
@@ -727,7 +808,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->WriteAttributeString('RegisteredIDs', json_encode($ids));
     }
 
-    /* ================= Status gating (Inhibit/Require) ================= */
+    /* ================= Status gating (Blocker/Freigaben) ================= */
     private function getBoolVarList(string $propName): array
     {
         $raw = @json_decode($this->ReadPropertyString($propName), true);
@@ -753,32 +834,6 @@ class RoomMotionLightsDev2 extends IPSModule
 
     private function shouldAllowAutoOn(): bool
     {
-        // 1) Inhibit zuerst: wenn irgendein Inhibit TRUE ist → blockieren
-        if ($this->anyTrue($this->getBoolVarList('RoomInhibit')) || $this->anyTrue($this->getBoolVarList('HouseInhibit'))) {
-            return false;
-        }
-
-        // 2) Require (erzwingen): Wenn Listen konfiguriert sind, muss mind. eine TRUE sein
-        $roomReq  = $this->getBoolVarList('RoomRequire');
-        $houseReq = $this->getBoolVarList('HouseRequire');
-        if ((count($roomReq) + count($houseReq)) > 0) {
-            if (!($this->anyTrue($roomReq) || $this->anyTrue($houseReq))) {
-                return false; // nichts erzwingt → nicht schalten
-            }
-        }
-
-        // 3) Lux-Prüfung (wenn konfiguriert/aktiv)
-        if ($this->isLuxConfigured() && !$this->isLuxOk()) {
-            return false; // zu hell
-        }
-
-        return true;
-    }
-
-    private function shouldAllowAutoOff(): bool
-    {
-        // Auto-Off (bei manuellem Einschalten) ist nur erlaubt,
-        // wenn nicht blockiert und – falls Erfordern-Listen vorhanden – mindestens eine TRUE ist.
         if ($this->anyTrue($this->getBoolVarList('RoomInhibit')) || $this->anyTrue($this->getBoolVarList('HouseInhibit'))) {
             return false;
         }
@@ -789,8 +844,25 @@ class RoomMotionLightsDev2 extends IPSModule
                 return false;
             }
         }
-        // Lux spielt für Auto-Off bei manueller Bedienung keine Rolle
+        if ($this->isLuxConfigured() && !$this->isLuxOk()) {
+            return false;
+        }
         return true;
+    }
+
+    private function shouldAllowAutoOff(): bool
+    {
+        if ($this->anyTrue($this->getBoolVarList('RoomInhibit')) || $this->anyTrue($this->getBoolVarList('HouseInhibit'))) {
+            return false;
+        }
+        $roomReq  = $this->getBoolVarList('RoomRequire');
+        $houseReq = $this->getBoolVarList('HouseRequire');
+        if ((count($roomReq) + count($houseReq)) > 0) {
+            if (!($this->anyTrue($roomReq) || $this->anyTrue($houseReq))) {
+                return false;
+            }
+        }
+        return true; // Lux ist für Auto-Off (manuell) egal
     }
 
     /* ================= Lux helpers ================= */
@@ -820,14 +892,91 @@ class RoomMotionLightsDev2 extends IPSModule
     {
         $vid = $this->getLuxVar();
         if ($vid === 0) {
-            return true; // keine Lux-Variable konfiguriert → Lux egal
+            return true;
         }
         $raw = @GetValue($vid);
         if (!is_numeric($raw)) {
-            return true; // unlesbar → sicherheitshalber nicht blockieren
+            return true;
         }
-        // Vergleich: aktueller Lux ≤ Schwelle?
-        return ((float)$raw) <= (float)$this->getLuxMax();
+        return ((float)$raw) <= (float)$this->getEffectiveLuxThreshold();
+    }
+
+    /* ================= Adaptive learning helpers ================= */
+    private function getEffectiveLuxThreshold(): int
+    {
+        if ($this->ReadPropertyBoolean('AdaptiveEnabled') && $this->isLuxConfigured()) {
+            $v = (int)@GetValueInteger($this->GetIDForIdent('LearnedLux'));
+            if ($v > 0) {
+                return $v;
+            }
+        }
+        return $this->getLuxMax();
+    }
+
+    private function recordDecision(string $type, ?int $lux, int $threshold): void
+    {
+        $this->WriteAttributeString('LastDecisionType', $type);
+        $this->WriteAttributeInteger('LastDecisionTS', time());
+        $this->WriteAttributeInteger('LastDecisionLux', is_null($lux) ? -1 : (int)$lux);
+        $this->WriteAttributeInteger('LastThreshold', $threshold);
+    }
+
+    private function withinAdaptiveWindow(): bool
+    {
+        $win = max(10, (int)$this->ReadPropertyInteger('AdaptiveWindowSec'));
+        $ts  = (int)$this->ReadAttributeInteger('LastDecisionTS');
+        return ($ts > 0) && ((time() - $ts) <= $win);
+    }
+
+    private function adjustLearnedLux(int $delta, string $reason): void
+    {
+        if (!$this->ReadPropertyBoolean('AdaptiveEnabled') || !$this->isLuxConfigured()) {
+            return;
+        }
+        $id = $this->GetIDForIdent('LearnedLux');
+        $val = (int)@GetValueInteger($id);
+        $minLux = 0;
+        $maxLux = 100000;
+        $new = min($maxLux, max($minLux, $val + $delta));
+        if ($new !== $val) {
+            @SetValueInteger($id, $new);
+            $samplesID = $this->GetIDForIdent('Samples');
+            $confID    = $this->GetIDForIdent('LearnConfidence');
+            $samples   = max(0, (int)@GetValueInteger($samplesID)) + 1;
+            $conf      = min(100, (int)floor(min(100, 10 + $samples * 10)));
+            @SetValueInteger($samplesID, $samples);
+            @SetValueInteger($confID, $conf);
+            @SetValueString($this->GetIDForIdent('LastFeedback'), $reason);
+            $this->appendEventLog('adaptive_'.$reason.': '.$new.' Lux');
+        }
+    }
+
+    private function learnFromManualOffAfterAutoOn(): void
+    {
+        // "Zu hell" → Grenzwert leicht senken
+        $deadband = 2;
+        $lastLux = (int)$this->ReadAttributeInteger('LastDecisionLux');
+        $lastTh  = (int)$this->ReadAttributeInteger('LastThreshold');
+        if ($lastLux >= 0 && ($lastTh - $lastLux) >= $deadband) {
+            $this->adjustLearnedLux(-abs((int)$this->ReadPropertyInteger('AdaptiveDelta')), 'too_bright_off');
+        } else {
+            $this->adjustLearnedLux(-1, 'too_bright_off');
+        }
+        $this->WriteAttributeInteger('LastDecisionTS', 0);
+    }
+
+    private function learnFromManualOnAfterBlocked(): void
+    {
+        // "Zu dunkel" → Grenzwert leicht erhöhen
+        $deadband = 2;
+        $lastLux = (int)$this->ReadAttributeInteger('LastDecisionLux');
+        $lastTh  = (int)$this->ReadAttributeInteger('LastThreshold');
+        if ($lastLux >= 0 && ($lastLux - $lastTh) >= $deadband) {
+            $this->adjustLearnedLux(+abs((int)$this->ReadPropertyInteger('AdaptiveDelta')), 'too_dark_on');
+        } else {
+            $this->adjustLearnedLux(+1, 'too_dark_on');
+        }
+        $this->WriteAttributeInteger('LastDecisionTS', 0);
     }
 
     /* ================= Debug Snapshot ================= */
@@ -868,8 +1017,17 @@ class RoomMotionLightsDev2 extends IPSModule
         $luxFeat = (bool)$this->ReadPropertyBoolean('UseLux');
         $luxVar  = (int)$this->ReadPropertyInteger('LuxVar');
         $luxMax  = (int)$this->ReadPropertyInteger('LuxMax');
+        $effThr  = (int)$this->getEffectiveLuxThreshold();
         $luxVal  = ($luxVar>0 && @IPS_VariableExists($luxVar)) ? (int)@GetValue($luxVar) : null;
-        $this->dbg('Lux: Feature='.($luxFeat?'ON':'OFF').' Var='.$luxVar.' Val='.(is_null($luxVal)?'n/a':$luxVal).' Max='.$luxMax);
+        $this->dbg('Lux: Feature='.($luxFeat?'ON':'OFF').' Var='.$luxVar.' Val='.(is_null($luxVal)?'n/a':$luxVal).' Max='.$luxMax.' EffThr='.$effThr.' Adaptive='.(int)$this->ReadPropertyBoolean('AdaptiveEnabled'));
+
+        // Adaptive state
+        $this->dbg('Adaptive: Learned='. (int)@GetValueInteger($this->GetIDForIdent('LearnedLux')) .
+            ' Conf='.(int)@GetValueInteger($this->GetIDForIdent('LearnConfidence')).
+            ' Samples='.(int)@GetValueInteger($this->GetIDForIdent('Samples')).
+            ' LastType='.$this->ReadAttributeString('LastDecisionType').
+            ' LastLux='.$this->ReadAttributeInteger('LastDecisionLux').
+            ' LastThr='.$this->ReadAttributeInteger('LastThreshold'));
 
         // Settings
         $this->dbg('Settings: TimeoutSec='.$this->getTimeoutSec(). ' DefaultDimPct='.$this->getDefaultDimPct().' UseDefaultDim='.(int)$this->ReadPropertyBoolean('UseDefaultDim').' AutoOffOnManual='.(int)$this->ReadPropertyBoolean('AutoOffOnManual'));
@@ -890,37 +1048,55 @@ class RoomMotionLightsDev2 extends IPSModule
         }
     }
 
+    /* ================= Public adaptive control ================= */
+    public function AdaptiveReset(): void
+    {
+        @SetValueInteger($this->GetIDForIdent('LearnedLux'), max(0, (int)$this->ReadPropertyInteger('LuxMax')));
+        @SetValueInteger($this->GetIDForIdent('LearnConfidence'), 0);
+        @SetValueInteger($this->GetIDForIdent('Samples'), 0);
+        @SetValueString($this->GetIDForIdent('LastFeedback'), '');
+        $this->WriteAttributeInteger('LastDecisionTS', 0);
+        $this->WriteAttributeString('LastDecisionType', '');
+        $this->WriteAttributeInteger('LastDecisionLux', -1);
+        $this->WriteAttributeInteger('LastThreshold', -1);
+        $this->appendEventLog('adaptive_reset');
+    }
+
+    public function AdaptiveNudgeUp(): void
+    {
+        $this->adjustLearnedLux(+abs((int)$this->ReadPropertyInteger('AdaptiveDelta')), 'manual_up');
+    }
+
+    public function AdaptiveNudgeDown(): void
+    {
+        $this->adjustLearnedLux(-abs((int)$this->ReadPropertyInteger('AdaptiveDelta')), 'manual_down');
+    }
+
     /* ================= Profiles ================= */
     private function ensureProfiles(): void
     {
-        // Boolean profile: Block (TRUE=blockiert, FALSE=frei)
         if (!IPS_VariableProfileExists('RMLDEV2.Block')) {
             IPS_CreateVariableProfile('RMLDEV2.Block', VARIABLETYPE_BOOLEAN);
             IPS_SetVariableProfileAssociation('RMLDEV2.Block', 0, 'frei', '', -1);
             IPS_SetVariableProfileAssociation('RMLDEV2.Block', 1, 'blockiert', '', -1);
         }
-        // Boolean profile: Passed/OK (TRUE=OK, FALSE=nicht erfüllt)
         if (!IPS_VariableProfileExists('RMLDEV2.Passed')) {
             IPS_CreateVariableProfile('RMLDEV2.Passed', VARIABLETYPE_BOOLEAN);
             IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 0, 'Freigabe fehlt', '', -1);
             IPS_SetVariableProfileAssociation('RMLDEV2.Passed', 1, 'Freigabe OK', '', -1);
         }
-        // Einfaches Sekunden-Profil für Integer: zeigt "XYZ s"
         if (!IPS_VariableProfileExists('RMLDEV2.Seconds')) {
             IPS_CreateVariableProfile('RMLDEV2.Seconds', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileDigits('RMLDEV2.Seconds', 0);
             IPS_SetVariableProfileText('RMLDEV2.Seconds', '', ' s');
             IPS_SetVariableProfileValues('RMLDEV2.Seconds', 0, 86400, 1);
         }
-        // Integer profile for TimeoutSec
         if (!IPS_VariableProfileExists('RMLDEV2.TimeoutSec')) {
             IPS_CreateVariableProfile('RMLDEV2.TimeoutSec', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileDigits('RMLDEV2.TimeoutSec', 0);
             IPS_SetVariableProfileText('RMLDEV2.TimeoutSec', '', ' s');
             IPS_SetVariableProfileValues('RMLDEV2.TimeoutSec', 5, 3600, 5);
         }
-
-        // Integer profile for Mode
         if (!IPS_VariableProfileExists('RMLDEV2.Mode')) {
             IPS_CreateVariableProfile('RMLDEV2.Mode', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 0, 'OK', '', -1);
@@ -929,7 +1105,6 @@ class RoomMotionLightsDev2 extends IPSModule
             IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 3, 'Lux zu hoch', '', -1);
             IPS_SetVariableProfileAssociation('RMLDEV2.Mode', 4, 'Deaktiviert', '', -1);
         }
-        // Integer profile for Source
         if (!IPS_VariableProfileExists('RMLDEV2.Source')) {
             IPS_CreateVariableProfile('RMLDEV2.Source', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileAssociation('RMLDEV2.Source', 0, 'keine', '', -1);
