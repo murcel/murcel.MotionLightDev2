@@ -49,6 +49,10 @@ class RoomMotionLightsDev2 extends IPSModule
 
         $this->RegisterVariableInteger('Set_DefaultDim', 'Standard-Helligkeit (%)', '~Intensity.100', 8);
         $this->EnableAction('Set_DefaultDim');
+        // Lux-Schwelle als Variable für IPSView
+        $this->RegisterVariableInteger('Set_LuxMax', 'Lux-Schwelle (≤)', '', 24);
+        $this->EnableAction('Set_LuxMax');
+        @SetValueInteger($this->GetIDForIdent('Set_LuxMax'), (int)$this->ReadPropertyInteger('LuxMax'));
 
         // Status-Indicatoren (read-only)
         $this->RegisterVariableBoolean('RoomInhibitActive', 'Raum-Blocker aktiv', 'RMLDEV2.Block', 3);
@@ -178,6 +182,7 @@ class RoomMotionLightsDev2 extends IPSModule
 
         @SetValueInteger($this->GetIDForIdent('Set_TimeoutSec'), max(5, min(3600, (int)$this->ReadPropertyInteger('TimeoutSec'))));
         @SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), max(1, min(100, (int)$this->ReadPropertyInteger('DefaultDimPct'))));
+        @SetValueInteger($this->GetIDForIdent('Set_LuxMax'), max(0, (int)$this->ReadPropertyInteger('LuxMax')));
 
         $this->updateStatusIndicators();
     }
@@ -300,6 +305,12 @@ class RoomMotionLightsDev2 extends IPSModule
             case 'Set_DefaultDim':
                 $val = max(1, min(100, (int)$Value));
                 SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), $val);
+                break;
+            case 'Set_LuxMax':
+                $val = max(0, (int)$Value);
+                SetValueInteger($this->GetIDForIdent('Set_LuxMax'), $val);
+                IPS_SetProperty($this->InstanceID, 'LuxMax', $val);
+                IPS_ApplyChanges($this->InstanceID);
                 break;
             case 'DebugDump':
                 $this->DebugDump();
