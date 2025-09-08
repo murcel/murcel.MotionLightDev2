@@ -30,6 +30,11 @@ class RoomMotionLightsDev2 extends IPSModule
         $this->RegisterPropertyInteger('LuxMax', 50);
         $this->RegisterPropertyBoolean('UseLux', true);
 
+        // Adaptive Lux Learning
+        $this->RegisterPropertyBoolean('AdaptiveLearningEnabled', false);
+        $this->RegisterPropertyInteger('LearningAlpha', 2); // step size in lx per feedback
+        $this->RegisterPropertyInteger('HysteresisPct', 10); // % hysteresis (reserved)
+
         // ---- Profiles ----
         $this->ensureProfiles();
 
@@ -84,6 +89,7 @@ class RoomMotionLightsDev2 extends IPSModule
         // ---- Attributes ----
         $this->RegisterAttributeInteger('AutoOffUntil', 0);
         $this->RegisterAttributeString('RegisteredIDs', '[]');
+        $this->RegisterAttributeString('LuxLearn', ''); // JSON state for adaptive learning
 
         // ---- Initial Defaults ----
         @SetValueBoolean($this->GetIDForIdent('EffectiveCanAutoOn'), false);
@@ -101,6 +107,20 @@ class RoomMotionLightsDev2 extends IPSModule
         @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), 0);
         @SetValueString($this->GetIDForIdent('DecisionJSON'), '{}');
         @SetValueString($this->GetIDForIdent('EventLog'), '');
+
+        // Adaptive Learning UI/State variables
+        $this->RegisterVariableBoolean('LearningEnabled', 'Adaptives Lux-Lernen aktiv', '~Switch', 30);
+        $this->EnableAction('LearningEnabled');
+        @SetValueBoolean($this->GetIDForIdent('LearningEnabled'), (bool)$this->ReadPropertyBoolean('AdaptiveLearningEnabled'));
+
+        $this->RegisterVariableString('LuxWindow', 'Aktuelles Zeitfenster', '', 31);
+        $this->RegisterVariableInteger('LuxThresholdEffective', 'Lux-Schwelle (effektiv)', '', 32);
+        $this->RegisterVariableInteger('Lux_Morning', 'Lux-Schwelle – Morgen', '', 33);
+        $this->RegisterVariableInteger('Lux_Day', 'Lux-Schwelle – Tag', '', 34);
+        $this->RegisterVariableInteger('Lux_Evening', 'Lux-Schwelle – Abend', '', 35);
+        $this->RegisterVariableInteger('Lux_Night', 'Lux-Schwelle – Nacht', '', 36);
+        $this->RegisterVariableInteger('Lux_Confidence', 'Lern-Sicherheit (%)', '~Intensity.100', 37);
+        $this->RegisterVariableString('LastFeedback', 'Letztes Feedback', '', 38);
     }
 
     public function ApplyChanges()
@@ -184,88 +204,99 @@ class RoomMotionLightsDev2 extends IPSModule
         @SetValueInteger($this->GetIDForIdent('Set_DefaultDim'), max(1, min(100, (int)$this->ReadPropertyInteger('DefaultDimPct'))));
         @SetValueInteger($this->GetIDForIdent('Set_LuxMax'), max(0, (int)$this->ReadPropertyInteger('LuxMax')));
 
+        $this->initLearningIfNeeded();
+        $this->updateLearningIndicators();
         $this->updateStatusIndicators();
     }
 
     /* ================= Configuration Form ================= */
     public function GetConfigurationForm(): string
     {
-        return json_encode([
-            'elements' => [
-                ['type' => 'ExpansionPanel', 'caption' => 'Bewegungsmelder', 'items' => [[
-                    'type' => 'List', 'name' => 'MotionVars', 'caption' => 'Melder',
+        // Build configuration form array to allow insertion of panel after "Lux (optional)"
+        $elements = [
+            ['type' => 'ExpansionPanel', 'caption' => 'Bewegungsmelder', 'items' => [[
+                'type' => 'List', 'name' => 'MotionVars', 'caption' => 'Melder',
+                'columns' => [[
+                    'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
+                    'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                ]],
+                'add' => true, 'delete' => true
+            ]]],
+            ['type' => 'ExpansionPanel', 'caption' => 'Lichter', 'items' => [[
+                'type' => 'List', 'name' => 'Lights', 'caption' => 'Akteure',
+                'columns' => [
+                    [
+                        'caption' => 'Ein/Aus-Variable',
+                        'name' => 'switchVar',
+                        'width' => '80%',
+                        'add' => 0,
+                        'edit' => ['type' => 'SelectVariable']
+                    ],
+                    [
+                        'caption' => 'Helligkeits-Variable (Intensity.100)',
+                        'name' => 'dimmerVar',
+                        'width' => '80%',
+                        'add' => 0,
+                        'edit' => ['type' => 'SelectVariable']
+                    ]
+                ],
+                'add' => true, 'delete' => true
+            ]]],
+            ['type' => 'ExpansionPanel', 'caption' => 'Lux (optional)', 'items' => [
+                ['type' => 'CheckBox', 'name' => 'UseLux', 'caption' => 'Lux berücksichtigen'],
+                ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable', 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')],
+                ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Wenn Lux niedriger als ⇒ schalten', 'minimum' => 0, 'maximum' => 100000, 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')]
+            ]],
+            // Adaptive Learning panel inserted here
+            ['type' => 'ExpansionPanel', 'caption' => 'Adaptives Lux-Lernen (Beta)', 'items' => [
+                ['type' => 'CheckBox', 'name' => 'AdaptiveLearningEnabled', 'caption' => 'Lernen aktivieren'],
+                ['type' => 'NumberSpinner', 'name' => 'LearningAlpha', 'caption' => 'Lernschritt (Lux)', 'minimum' => 1, 'maximum' => 50, 'enabled' => (bool)$this->ReadPropertyBoolean('AdaptiveLearningEnabled')],
+                ['type' => 'NumberSpinner', 'name' => 'HysteresisPct', 'caption' => 'Hysterese (%)', 'minimum' => 0, 'maximum' => 50, 'enabled' => (bool)$this->ReadPropertyBoolean('AdaptiveLearningEnabled')],
+                ['type' => 'Label', 'caption' => 'Hinweis: In diesem Schritt wird nur die effektive Lux-Schwelle pro Zeitfenster verwendet. Lernen (Feedback) folgt im nächsten Schritt.']
+            ]],
+            ['type' => 'ExpansionPanel', 'caption' => 'Bedingungen: Blocker & Freigaben', 'items' => [
+                ['type' => 'Label', 'caption' => 'Blocker (nicht schalten bei TRUE)'],
+                ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Blocker',
                     'columns' => [[
                         'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
                         'add' => 0, 'edit' => ['type' => 'SelectVariable']
                     ]],
                     'add' => true, 'delete' => true
-                ]]],
-                ['type' => 'ExpansionPanel', 'caption' => 'Lichter', 'items' => [[
-                    'type' => 'List', 'name' => 'Lights', 'caption' => 'Akteure',
-                    'columns' => [
-                        [
-                            'caption' => 'Ein/Aus-Variable',
-                            'name' => 'switchVar',
-                            'width' => '80%',
-                            'add' => 0,
-                            'edit' => ['type' => 'SelectVariable']
-                        ],
-                        [
-                            'caption' => 'Helligkeits-Variable (Intensity.100)',
-                            'name' => 'dimmerVar',
-                            'width' => '80%',
-                            'add' => 0,
-                            'edit' => ['type' => 'SelectVariable']
-                        ]
-                    ],
+                ],
+                ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Blocker',
+                    'columns' => [[
+                        'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
+                        'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                    ]],
                     'add' => true, 'delete' => true
-                ]]],
-                ['type' => 'ExpansionPanel', 'caption' => 'Lux (optional)', 'items' => [
-                    ['type' => 'CheckBox', 'name' => 'UseLux', 'caption' => 'Lux berücksichtigen'],
-                    ['type' => 'SelectVariable', 'name' => 'LuxVar', 'caption' => 'Lux-Variable', 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')],
-                    ['type' => 'NumberSpinner',  'name' => 'LuxMax', 'caption' => 'Wenn Lux niedriger als ⇒ schalten', 'minimum' => 0, 'maximum' => 100000, 'enabled' => (bool)$this->ReadPropertyBoolean('UseLux')]
-                ]],
-                ['type' => 'ExpansionPanel', 'caption' => 'Bedingungen: Blocker & Freigaben', 'items' => [
-                    ['type' => 'Label', 'caption' => 'Blocker (nicht schalten bei TRUE)'],
-                    ['type' => 'List', 'name' => 'RoomInhibit', 'caption' => 'Raum – Blocker',
-                        'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
-                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
-                        ]],
-                        'add' => true, 'delete' => true
-                    ],
-                    ['type' => 'List', 'name' => 'HouseInhibit', 'caption' => 'Haus – Blocker',
-                        'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
-                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
-                        ]],
-                        'add' => true, 'delete' => true
-                    ],
-                    ['type' => 'Label', 'caption' => 'Freigaben (nur schalten bei TRUE)'],
-                    ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Freigaben',
-                        'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
-                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
-                        ]],
-                        'add' => true, 'delete' => true
-                    ],
-                    ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Freigaben',
-                        'columns' => [[
-                            'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
-                            'add' => 0, 'edit' => ['type' => 'SelectVariable']
-                        ]],
-                        'add' => true, 'delete' => true
-                    ]
-                ]],
-                ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
-                    ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
-                    ['type' => 'CheckBox', 'name' => 'UseDefaultDim', 'caption' => 'Helligkeit beim Einschalten setzen'],
-                    ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100, 'enabled' => (bool)$this->ReadPropertyBoolean('UseDefaultDim')],
-                    ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren'],
-                    ['type' => 'CheckBox', 'name' => 'AutoOffOnManual', 'caption' => 'Auto-Off auch bei manuellem Einschalten'],
-                    ['type' => 'CheckBox', 'name' => 'DebugEnabled', 'caption' => 'Debug-Ausgabe aktivieren'],
-                ]]
-            ],
+                ],
+                ['type' => 'Label', 'caption' => 'Freigaben (nur schalten bei TRUE)'],
+                ['type' => 'List', 'name' => 'RoomRequire', 'caption' => 'Raum – Freigaben',
+                    'columns' => [[
+                        'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
+                        'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                    ]],
+                    'add' => true, 'delete' => true
+                ],
+                ['type' => 'List', 'name' => 'HouseRequire', 'caption' => 'Haus – Freigaben',
+                    'columns' => [[
+                        'caption' => 'Variable', 'name' => 'var', 'width' => '80%',
+                        'add' => 0, 'edit' => ['type' => 'SelectVariable']
+                    ]],
+                    'add' => true, 'delete' => true
+                ]
+            ]],
+            ['type' => 'ExpansionPanel', 'caption' => 'Einstellungen', 'items' => [
+                ['type' => 'NumberSpinner', 'name' => 'TimeoutSec', 'caption' => 'Timeout (Sekunden)', 'minimum' => 5, 'maximum' => 3600],
+                ['type' => 'CheckBox', 'name' => 'UseDefaultDim', 'caption' => 'Helligkeit beim Einschalten setzen'],
+                ['type' => 'NumberSpinner', 'name' => 'DefaultDimPct', 'caption' => 'Standard-Helligkeit (%)', 'minimum' => 1, 'maximum' => 100, 'enabled' => (bool)$this->ReadPropertyBoolean('UseDefaultDim')],
+                ['type' => 'CheckBox', 'name' => 'StartEnabled', 'caption' => 'Beim Start aktivieren'],
+                ['type' => 'CheckBox', 'name' => 'AutoOffOnManual', 'caption' => 'Auto-Off auch bei manuellem Einschalten'],
+                ['type' => 'CheckBox', 'name' => 'DebugEnabled', 'caption' => 'Debug-Ausgabe aktivieren'],
+            ]]
+        ];
+        return json_encode([
+            'elements' => $elements,
             'actions'  => [
                 [
                     'type'    => 'Button',
@@ -293,6 +324,11 @@ class RoomMotionLightsDev2 extends IPSModule
                     @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), 0);
                 }
                 $this->updateStatusIndicators();
+                break;
+            case 'LearningEnabled':
+                SetValueBoolean($this->GetIDForIdent('LearningEnabled'), (bool)$Value);
+                IPS_SetProperty($this->InstanceID, 'AdaptiveLearningEnabled', (bool)$Value);
+                IPS_ApplyChanges($this->InstanceID);
                 break;
             case 'Set_TimeoutSec':
                 $val = max(5, min(3600, (int)$Value));
@@ -499,6 +535,7 @@ class RoomMotionLightsDev2 extends IPSModule
         $autoOffUntil = (int)$this->ReadAttributeInteger('AutoOffUntil');
         @SetValueBoolean($this->GetIDForIdent('AutoOffRunning'), $autoOffUntil > time());
         @SetValueInteger($this->GetIDForIdent('NextAutoOffTS'), $autoOffUntil);
+        $this->updateLearningIndicators();
     }
     /**
      * Returns the first id in the list with boolean value TRUE, or 0 if none.
@@ -826,8 +863,10 @@ class RoomMotionLightsDev2 extends IPSModule
         if (!is_numeric($raw)) {
             return true; // unlesbar → sicherheitshalber nicht blockieren
         }
-        // Vergleich: aktueller Lux ≤ Schwelle?
-        return ((float)$raw) <= (float)$this->getLuxMax();
+        $currentLux = (float)$raw;
+        $thr = (float)$this->getEffectiveLuxThreshold();
+        // (Hysterese ist für Schritt 1 noch nicht aktiv verwendet)
+        return $currentLux <= $thr;
     }
 
     /* ================= Debug Snapshot ================= */
@@ -939,3 +978,80 @@ class RoomMotionLightsDev2 extends IPSModule
         }
     }
 }
+    /* ================= Adaptive Learning (Step 1: storage & effective threshold) ================= */
+    private function initLearningIfNeeded(): void
+    {
+        $stateRaw = $this->ReadAttributeString('LuxLearn');
+        $state = @json_decode($stateRaw, true);
+        if (!is_array($state) || !isset($state['windows'])) {
+            $def = (int)$this->ReadPropertyInteger('LuxMax');
+            $state = [
+                'windows' => [
+                    'morning' => ['thr'=>$def, 'samples'=>0, 'confidence'=>0.0],
+                    'day'     => ['thr'=>$def, 'samples'=>0, 'confidence'=>0.0],
+                    'evening' => ['thr'=>$def, 'samples'=>0, 'confidence'=>0.0],
+                    'night'   => ['thr'=>$def, 'samples'=>0, 'confidence'=>0.0],
+                ],
+                'lastUpdate' => time()
+            ];
+            $this->WriteAttributeString('LuxLearn', json_encode($state));
+        }
+    }
+
+    private function getCurrentWindowKey(): string
+    {
+        $h = (int)date('G');
+        if ($h >= 6 && $h < 9) return 'morning';
+        if ($h >= 9 && $h < 18) return 'day';
+        if ($h >= 18 && $h < 22) return 'evening';
+        return 'night';
+    }
+
+    private function loadLearnState(): array
+    {
+        $raw = $this->ReadAttributeString('LuxLearn');
+        $arr = @json_decode($raw, true);
+        return is_array($arr) ? $arr : [];
+    }
+
+    private function saveLearnState(array $state): void
+    {
+        $this->WriteAttributeString('LuxLearn', json_encode($state));
+    }
+
+    private function getEffectiveLuxThreshold(): int
+    {
+        $this->initLearningIfNeeded();
+        $useAdaptive = (bool)$this->ReadPropertyBoolean('AdaptiveLearningEnabled');
+        if (!$useAdaptive) {
+            $thr = (int)$this->ReadPropertyInteger('LuxMax');
+            @SetValueInteger($this->GetIDForIdent('LuxThresholdEffective'), $thr);
+            @SetValueString($this->GetIDForIdent('LuxWindow'), '-');
+            return $thr;
+        }
+        $state = $this->loadLearnState();
+        $win = $this->getCurrentWindowKey();
+        $thr = (int)($state['windows'][$win]['thr'] ?? (int)$this->ReadPropertyInteger('LuxMax'));
+        @SetValueInteger($this->GetIDForIdent('LuxThresholdEffective'), $thr);
+        @SetValueString($this->GetIDForIdent('LuxWindow'), $win);
+        return $thr;
+    }
+
+    private function updateLearningIndicators(): void
+    {
+        $this->initLearningIfNeeded();
+        $state = $this->loadLearnState();
+        $win = $this->getCurrentWindowKey();
+        $thrM = (int)($state['windows']['morning']['thr'] ?? 0);
+        $thrD = (int)($state['windows']['day']['thr'] ?? 0);
+        $thrE = (int)($state['windows']['evening']['thr'] ?? 0);
+        $thrN = (int)($state['windows']['night']['thr'] ?? 0);
+        @SetValueInteger($this->GetIDForIdent('Lux_Morning'), $thrM);
+        @SetValueInteger($this->GetIDForIdent('Lux_Day'), $thrD);
+        @SetValueInteger($this->GetIDForIdent('Lux_Evening'), $thrE);
+        @SetValueInteger($this->GetIDForIdent('Lux_Night'), $thrN);
+        $conf = (int)round(100 * (float)($state['windows'][$win]['confidence'] ?? 0.0));
+        @SetValueInteger($this->GetIDForIdent('Lux_Confidence'), max(0, min(100, $conf)));
+        // Effective threshold & window
+        $this->getEffectiveLuxThreshold();
+    }
