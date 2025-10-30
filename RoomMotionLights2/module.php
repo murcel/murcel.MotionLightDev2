@@ -395,7 +395,9 @@ class RoomMotionLightsDev2 extends IPSModule
             if ($mv) {
                 $ev = $this->evaluateAutoOn();
                 if ($ev['canAutoOn']) {
-                    $this->switchLights(true);
+                    if (!$this->isAnyLightOn()) {
+    $this->switchLights(true);
+}
                     $this->armAutoOffTimer();
                     $threshold = (int)$ev['threshold'];
                     $luxAt = is_null($ev['luxValue']) ? null : (int)$ev['luxValue'];
@@ -698,29 +700,44 @@ class RoomMotionLightsDev2 extends IPSModule
 
     /* ================= Helpers ================= */
     private function switchLights(bool $on): void
-    {
-        $targetPct = $this->getDefaultDimPct();
-        foreach ($this->getLights() as $l) {
-            $sv = (int)($l['switchVar'] ?? 0);
-            $dv = (int)($l['dimmerVar'] ?? 0);
+{
+    $targetPct = $this->getDefaultDimPct();
+    foreach ($this->getLights() as $l) {
+        $sv = (int)($l['switchVar'] ?? 0);
+        $dv = (int)($l['dimmerVar'] ?? 0);
 
+        if ($on) {
+            // Switch nur setzen, wenn aktuell AUS
             if ($sv > 0 && @IPS_VariableExists($sv)) {
-                @RequestAction($sv, $on);
-            }
-
-            // Beim Einschalten – falls Dimmer vorhanden – auf Ziel-Pegel setzen (optional)
-            if ($on && (bool)$this->ReadPropertyBoolean('UseDefaultDim') && $dv > 0 && @IPS_VariableExists($dv)) {
-                $current = @GetValueInteger($dv);
-                if (!is_int($current)) {
-                    $current = (int)$current;
+                $cur = (bool)@GetValueBoolean($sv);
+                if ($cur !== true) {
+                    @RequestAction($sv, true);
                 }
-                if ($targetPct > 0 && $current !== $targetPct) {
-                    // Dimmer-Variable hat Profil Intensity.100 (0..100) → wir geben Prozent direkt
-                    @RequestAction($dv, $targetPct);
+            }
+            // Dimmer nur setzen, wenn UseDefaultDim aktiv und der Wert != Ziel
+            if ((bool)$this->ReadPropertyBoolean('UseDefaultDim') && $dv > 0 && @IPS_VariableExists($dv)) {
+                $current = (int)@GetValueInteger($dv);
+                if ($current !== (int)$targetPct) {
+                    @RequestAction($dv, (int)$targetPct);
+                }
+            }
+        } else {
+            // Beim Ausschalten: Dimmer auf 0 (falls >0), Switch nur wenn an
+            if ($dv > 0 && @IPS_VariableExists($dv)) {
+                $current = (int)@GetValueInteger($dv);
+                if ($current !== 0) {
+                    @RequestAction($dv, 0);
+                }
+            }
+            if ($sv > 0 && @IPS_VariableExists($sv)) {
+                $cur = (bool)@GetValueBoolean($sv);
+                if ($cur !== false) {
+                    @RequestAction($sv, false);
                 }
             }
         }
     }
+}
 
     private function getTimeoutSec(): int
     {
@@ -766,7 +783,25 @@ class RoomMotionLightsDev2 extends IPSModule
         }
         return false;
     }
+private function isAnyLightOn(): bool
+{
+    foreach ($this->getLights() as $l) {
+        $sv = (int)($l['switchVar'] ?? 0);
+        $dv = (int)($l['dimmerVar'] ?? 0);
 
+        if ($dv > 0 && @IPS_VariableExists($dv)) {
+            if ((int)@GetValueInteger($dv) > 0) {
+                return true;
+            }
+        }
+        if ($sv > 0 && @IPS_VariableExists($sv)) {
+            if ((bool)@GetValueBoolean($sv) === true) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
     private function getMotionVars(): array
     {
         $raw = @json_decode($this->ReadPropertyString('MotionVars'), true);
