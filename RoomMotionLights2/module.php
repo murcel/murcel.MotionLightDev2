@@ -389,26 +389,57 @@ class RoomMotionLightsDev2 extends IPSModule
         }
         $this->updateStatusIndicators();
 
+        // React to status changes (Require/Inhibit/Lux) while motion is active
+        $statusIdsMerged = array_merge(
+            $this->getBoolVarList('RoomInhibit'),
+            $this->getBoolVarList('HouseInhibit'),
+            $this->getBoolVarList('RoomRequire'),
+            $this->getBoolVarList('HouseRequire')
+        );
+        $inStatusLists = in_array($SenderID, $statusIdsMerged, true);
+        $isLuxVar = ($SenderID === $this->getLuxVar());
+
+        if ($inStatusLists || $isLuxVar) {
+            if ($this->isAnyMotionActive()) {
+                $ev = $this->evaluateAutoOn();
+                if ($ev['canAutoOn']) {
+                    $targetPct = $this->ReadPropertyBoolean('UseDefaultDim') ? $this->getDefaultDimPct() : null;
+                    $this->ensureLightsAtTarget($targetPct);
+                    $this->armAutoOffTimer();
+
+                    $threshold = (int)$ev['threshold'];
+                    $this->recordDecision('status_change_with_motion', is_null($ev['luxValue']) ? null : (int)$ev['luxValue'], $threshold);
+                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Status geändert + Bewegung → Licht an (Ziel ' . ((int)($targetPct ?? 0)) . '%)');
+                    @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
+                    @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 1);
+                    @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), (int)($targetPct ?? 0));
+                    $this->writeDecision($ev + ['event' => 'status_change_with_motion', 'action' => 'on', 'targetPct' => (int)($targetPct ?? 0), 'threshold' => $threshold]);
+                    $this->updateStatusIndicators();
+                }
+            }
+            return;
+        }
+
         // Movement?
         if (in_array($SenderID, $this->getMotionVars(), true)) {
             $mv = (bool)@GetValueBoolean($SenderID);
             if ($mv) {
                 $ev = $this->evaluateAutoOn();
                 if ($ev['canAutoOn']) {
-                    if (!$this->isAnyLightOn()) {
-    $this->switchLights(true);
-}
+                    $targetPct = $this->ReadPropertyBoolean('UseDefaultDim') ? $this->getDefaultDimPct() : null;
+                    $this->ensureLightsAtTarget($targetPct);
                     $this->armAutoOffTimer();
+
                     $threshold = (int)$ev['threshold'];
                     $luxAt = is_null($ev['luxValue']) ? null : (int)$ev['luxValue'];
                     $this->recordDecision('auto_on', $luxAt, $threshold);
 
-                    $targetPct = $this->ReadPropertyBoolean('UseDefaultDim') ? $this->getDefaultDimPct() : 0;
-                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Bewegung erkannt → Licht an (Ziel '.$targetPct.'%)');
+                    $tp = (int)($targetPct ?? 0);
+                    @SetValueString($this->GetIDForIdent('LastDecision'), 'Bewegung erkannt → Licht an (Ziel '.$tp.'%)');
                     @SetValueString($this->GetIDForIdent('LastAction'), 'ON');
                     @SetValueInteger($this->GetIDForIdent('LastSwitchSource'), 1);
-                    @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), $targetPct);
-                    $this->writeDecision($ev + ['event'=>'motion_true','action'=>'on','targetPct'=>$targetPct,'threshold'=>$threshold]);
+                    @SetValueInteger($this->GetIDForIdent('LastDimTargetPct'), $tp);
+                    $this->writeDecision($ev + ['event'=>'motion_true','action'=>'on','targetPct'=>$tp,'threshold'=>$threshold]);
                 } else {
                     // Wenn wegen Lux blockiert, Entscheidung mitspeichern (für Lernen)
                     if ($ev['mode'] === 3) {
@@ -738,6 +769,34 @@ class RoomMotionLightsDev2 extends IPSModule
         }
     }
 }
+
+    /**
+     * Ensure all lights are ON and at the specified target dim level (if given).
+     */
+    private function ensureLightsAtTarget(?int $targetPct): void
+    {
+        foreach ($this->getLights() as $l) {
+            $sv = (int)($l['switchVar'] ?? 0);
+            $dv = (int)($l['dimmerVar'] ?? 0);
+
+            // 1) Ensure power is ON
+            if ($sv > 0 && @IPS_VariableExists($sv)) {
+                $curSwitch = (bool)@GetValueBoolean($sv);
+                if ($curSwitch !== true) {
+                    @RequestAction($sv, true);
+                    usleep(150 * 1000);
+                }
+            }
+
+            // 2) Ensure dim level equals target (only if a target is specified)
+            if (!is_null($targetPct) && $dv > 0 && @IPS_VariableExists($dv)) {
+                $current = (int)@GetValueInteger($dv);
+                if ($current !== (int)$targetPct) {
+                    @RequestAction($dv, (int)$targetPct);
+                }
+            }
+        }
+    }
 
     private function getTimeoutSec(): int
     {
